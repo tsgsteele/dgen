@@ -34,12 +34,12 @@ pd.set_option('mode.chained_assignment', None)
 import warnings
 warnings.simplefilter("ignore")
 
+
 def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
     model_settings = settings.init_model_settings()
     os.makedirs(model_settings.out_dir, exist_ok=True)
     logger = utilfunc.get_logger(os.path.join(model_settings.out_dir, 'dg_model.log'))
     print(f"Detected CPUs = {os.cpu_count()}, multiprocessing.cpu_count() = {multiprocessing.cpu_count()}", flush=True)
-    print(f"model_settings.local_cores = {model_settings.local_cores}")
 
     con, cur = utilfunc.make_con(model_settings.pg_conn_string, model_settings.role)
     engine = utilfunc.make_engine(model_settings.pg_engine_string)
@@ -273,6 +273,53 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                         initargs=(model_settings.pg_conn_string, model_settings.role)
                     )
 
+                    # ── PRELOAD ALL HOURLY PROFILES FOR THIS STATE ──
+                    agent_ids = solar_agents.df['bldg_id'].tolist()
+                    sector    = solar_agents.df['sector_abbr'].iat[0]
+                    state     = solar_agents.df['state_abbr'].iat[0]
+                    solar_gids = solar_agents.df['solar_re_9809_gid'].unique().tolist()
+
+                    sql_load = """
+                    SELECT 
+                        bldg_id,
+                        kwh_load_profile AS consumption_hourly
+                    FROM diffusion_load_profiles.resstock_load_profiles
+                    WHERE sector_abbr = %s
+                    AND state_abbr  = %s
+                    AND bldg_id      = ANY(%s);
+                    """
+
+                    load_df = pd.read_sql(
+                        sql_load,
+                        con,                            # can be your raw pg8000 connection or engine
+                        params=[sector, state, agent_ids],
+                        coerce_float=False
+                    )
+
+                    # Solar CF + scale offset
+                    ids_str      = ','.join(str(i) for i in solar_gids)
+                    tilts_str    = ','.join(str(int(t)) for t in solar_agents.df['tilt'].unique())
+                    azimuths_str = ','.join(f"'{a}'" for a in solar_agents.df['azimuth'].unique())
+
+                    sql_solar = f"""
+                    SELECT 
+                        solar_re_9809_gid   AS solar_re_9809_gid,
+                        cf                  AS solar_cf_profile,
+                        azimuth             AS azimuth,
+                        tilt                AS tilt,
+                        1e6                 AS scale_offset
+                    FROM diffusion_resource_solar.solar_resource_hourly
+                    WHERE solar_re_9809_gid IN ({ids_str})
+                    AND tilt    IN ({tilts_str})
+                    AND azimuth IN ({azimuths_str});
+                    """
+
+                    solar_df = pd.read_sql(sql_solar, con, coerce_float=False)
+                    solar_df = solar_df.drop_duplicates(
+                        subset=['solar_re_9809_gid','tilt','azimuth'],
+                        keep='first'
+                    )
+
                     worker_pids = [p.pid for p in pool._pool]
                     logger.info(f"Spawned {len(worker_pids)} workers, PIDs={worker_pids}")
 
@@ -289,9 +336,11 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                         (
                             static_df.loc[chunk_ids],
                             scenario_settings.sectors,
-                            rate_switch_table
+                            rate_switch_table,
+                            load_df,     # <— pass in the full-state tables
+                            solar_df
                         )
-                        for idx, chunk_ids in enumerate(chunks)
+                        for chunk_ids in np.array_split(static_df.index.tolist(), cores)
                     ]
 
                     logger.info(f"Sizing {total_agents} agents in {len(tasks)} chunks with {cores} workers")

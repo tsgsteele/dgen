@@ -1121,35 +1121,61 @@ def _init_worker(dsn, role):
     global _worker_conn
     _worker_conn, _ = utilfunc.make_con(dsn, role)
 
-def size_chunk(static_agents_df, sectors, rate_switch_table):
+def size_chunk(static_agents_df,
+               sectors,
+               rate_switch_table,
+               load_df,
+               solar_df):
     """
-    Returns a DataFrame with the sized agents.
+    1) Subset & bulk-apply load scaling
+    2) Subset & bulk-apply solar CF scaling
+    3) Loop only over calc_system_size_and_performance
     """
-
     global _worker_conn
-    results = []
+    # 1) JOIN this chunk’s load profiles and scale them
+    ld    = load_df[load_df['bldg_id'].isin(static_agents_df['bldg_id'])]
+    merged = static_agents_df.merge(
+        ld[['bldg_id','consumption_hourly']],
+        on='bldg_id',
+        how='left'
+    )
 
-    for aid, row in static_agents_df.iterrows():
-        agent = row.copy()
-        agent.name = aid
-
-        lp = agent_mutation.elec.get_and_apply_agent_load_profiles(_worker_conn, agent)
-        cons = lp['consumption_hourly'].iloc[0]
-        agent.loc['consumption_hourly'] = cons.tolist()
-
-        norm = agent_mutation.elec.get_and_apply_normalized_hourly_resource_solar(_worker_conn, agent)
-        raw = norm['solar_cf_profile'].iloc[0]
-        gen = (np.array(raw, dtype=float) / 1e6).tolist()
-        agent.loc['generation_hourly'] = gen
-        agent.loc['naep'] = sum(gen)
-
-        sized = calc_system_size_and_performance(
-            _worker_conn,
-            agent,
-            sectors,
-            rate_switch_table
+    # pre‐compute per‐agent sums
+    merged['consumption_hourly'] = [
+        [x * tgt / s if s else 0
+         for x in profile]
+        for profile, s, tgt in zip(
+            merged['consumption_hourly'],
+            merged['load_kwh_per_customer_in_bin'],
+            merged['load_kwh_per_customer_in_bin']
         )
-        results.append(sized)
+    ]
+
+    # 2) JOIN this chunk’s solar CFs and scale them
+    sd = solar_df[solar_df['solar_re_9809_gid']
+                  .isin(merged['solar_re_9809_gid'])]
+    merged = merged.merge(
+        sd[['solar_re_9809_gid','tilt','azimuth',
+            'solar_cf_profile','scale_offset']],
+        on=['solar_re_9809_gid','tilt','azimuth'],
+        how='left'
+    )
+    merged['scale_offset'] = merged['scale_offset'].astype(float)
+    merged['generation_hourly'] = [
+        [float(x)/offset for x in cf]
+        for cf, offset in zip(
+            merged['solar_cf_profile'],
+            merged['scale_offset']
+        )
+    ]
+    merged['naep'] = [sum(cf) for cf in merged['generation_hourly']]
+
+    # 3) Now size each agent
+    results = []
+    for _, agent in merged.iterrows():
+        results.append(calc_system_size_and_performance(
+            _worker_conn, agent, sectors, rate_switch_table
+        ))
 
     return pd.DataFrame(results)
 
