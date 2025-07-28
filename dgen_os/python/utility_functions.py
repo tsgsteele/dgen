@@ -1,6 +1,6 @@
 import json
 import getopt
-from google.cloud.sql.connector import Connector
+from google.cloud.sql.connector import Connector, IPTypes
 import sys
 import colorama
 import logging
@@ -166,6 +166,7 @@ def make_con(connection_string, role, async_=False):
             user=user,
             password=password,
             db=dbname,
+            ip_type=IPTypes.PRIVATE
         )
         cur = conn.cursor()
         # SET ROLE still works
