@@ -303,8 +303,8 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                     target = float(row['load_kwh_per_customer_in_bin'])
                     return (prof / prof.sum() * target).tolist()
 
-                load_df['scaled_consumption_hourly'] = load_df.apply(scale_profile, axis=1)
-                load_df = load_df[['bldg_id', 'scaled_consumption_hourly']]
+                load_df['consumption_hourly'] = load_df.apply(scale_profile, axis=1)
+                load_df = load_df[['bldg_id', 'consumption_hourly']]
 
                 # ── Solar profile query in parallel ──
                 solar_gids = solar_agents.df['solar_re_9809_gid'].unique().tolist()
