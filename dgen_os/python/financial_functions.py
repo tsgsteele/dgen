@@ -233,26 +233,9 @@ def calc_system_performance(kw, pv, utilityrate, loan, batt, costs, agent, rate_
 def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None):
     """
     Calculate the optimal system and battery size and generation profile, and resulting bill savings and financial metrics.
-
-    Parameters
-    ----------
-    con : psycopg2.extensions.connection
-        A live database connection (opened once per worker).
-    agent : pandas.Series
-        Individual agent record (indexed by agent_id).
-    sectors : list[str]
-        The sector(s) for this scenario.
-    rate_switch_table : pandas.DataFrame, optional
-        Rate-switching rules for storage and solar.
-
-    Returns
-    -------
-    pandas.Series
-        The input `agent` series augmented with sizing, performance and financial fields.
     """
     cur = con.cursor()
 
-    # work on a copy so we don’t clobber the caller’s state
     agent = agent.copy()
     if 'agent_id' not in agent.index:
         agent.loc['agent_id'] = agent.name
@@ -265,13 +248,15 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
     del lp
     load_profiles_total_time = time.time() - t0
 
-    t0 = time.time()
+    # --- Solar resource lookup timings ---
+    t_solar_start = time.time()
     norm = agent_mutation.elec.get_and_apply_normalized_hourly_resource_solar(con, agent)
-    gen = np.array(norm['solar_cf_profile'].iloc[0], dtype=float) / 1e6
+    cf_profile = norm['solar_cf_profile'].iloc[0]  # single-row df, grab value
+    gen = np.array(cf_profile, dtype=float) / 1e6
     agent.loc['generation_hourly'] = gen.tolist()
     agent.loc['naep'] = float(gen.sum())
     del norm
-    solar_resource_total_time = time.time() - t0
+    solar_resource_total_time = time.time() - t_solar_start
 
     pv = {
         'consumption_hourly': cons,
@@ -1117,12 +1102,13 @@ def eqn_builder(method,incentive_info, info_params, default_params,additional_da
         return function
     
 _worker_conn = None
+resource_lookup = None
 
 def _init_worker(dsn, role):
     """
     Pool initializer: open a fresh psycopg2 connection in this worker.
     """
-    global _worker_conn
+    global _worker_conn 
     _worker_conn, _ = utilfunc.make_con(dsn, role)
 
 def size_chunk(static_agents_df, sectors, rate_switch_table):

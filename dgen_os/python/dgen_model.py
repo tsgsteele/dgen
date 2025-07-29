@@ -17,12 +17,14 @@ import data_functions as datfunc
 import utility_functions as utilfunc
 import settings
 import agent_mutation
+from agent_mutation.elec import _init_worker_resource_lookup
 import diffusion_functions_elec
 import financial_functions
 from functools import partial
 import input_data_functions as iFuncs
 import PySAM
 import multiprocessing
+from multiprocessing import get_context, Manager
 from financial_functions import size_chunk, _init_worker
 import logging
 from sqlalchemy import event
@@ -33,6 +35,31 @@ pd.set_option('mode.chained_assignment', None)
 # Suppress pandas warnings
 import warnings
 warnings.simplefilter("ignore")
+
+def _composite_worker_init(dsn, role):
+    _init_worker(dsn, role)
+    _init_worker_resource_lookup()
+
+def fetch_resource_chunk(chunk_df, dsn, role):
+    con, _ = utilfunc.make_con(dsn, role)
+
+    # Build WHERE clause just like in get_and_apply...
+    clauses = [
+        f"(solar_re_9809_gid = '{row.solar_re_9809_gid}' AND tilt = '{row.tilt}' AND azimuth = '{row.azimuth}')"
+        for row in chunk_df.itertuples(index=False)
+    ]
+    where_clause = " OR\n    ".join(clauses)
+
+    sql = f"""
+        SELECT DISTINCT ON (solar_re_9809_gid, tilt, azimuth) 
+            solar_re_9809_gid, tilt, azimuth,
+            cf AS generation_hourly,
+            1e6 AS scale_offset
+        FROM diffusion_resource_solar.solar_resource_hourly
+        WHERE {where_clause};
+    """
+
+    return pd.read_sql(sql, con)
 
 def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
     model_settings = settings.init_model_settings()
@@ -248,9 +275,32 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                 solar_agents.on_frame(agent_mutation.elec.apply_state_incentives,
                                        [state_incentives, year, model_settings.start_year, state_capacity_by_year])
 
+                # ----- Extracting large solar hourly resource profiles before parallel processing --------
+
+                # Build unique triplets of (solar_re_9809_gid, tilt, azimuth)
+                triplet_cols = ['solar_re_9809_gid', 'tilt', 'azimuth']
+                unique_triplets = solar_agents.df[triplet_cols].drop_duplicates()
+                triplet_chunks = np.array_split(unique_triplets, 8)
+                
+                # Dispatch parallel resource fetching
+                ctx = get_context('spawn')  # Use 'spawn' for safety in cloud VMs
+                with ctx.Pool(processes=8) as pool:
+                    results = pool.starmap(
+                        fetch_resource_chunk,
+                        [(chunk, model_settings.pg_conn_string, model_settings.role) for chunk in triplet_chunks]
+                    )
+
+                df_resource_profiles = pd.concat(results, ignore_index=True)
+                if not df_resource_profiles.empty:
+                    df_resource_profiles.to_parquet('/tmp/resource_profiles.parquet')
+                else:
+                    raise RuntimeError("No solar resource profiles fetched! Check triplets or SQL connection.")
+                
+                print(f"Fetched {len(df_resource_profiles)} solar hourly resource profiles across {len(unique_triplets)} triplets.")
+
                 # ── parallel system‐sizing ──
                 if os.name == 'posix':
-                    cores = model_settings.local_cores
+                    cores = 6
                 else:
                     cores = None
                 print(f"Using {cores} cores for parallel processing", flush=True)
@@ -263,13 +313,11 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                         rate_switch_table=rate_switch_table
                     )
                 else:
-                    from multiprocessing import get_context, Manager
-
                     # build a spawn‐based Pool with a DB connection in each worker
                     ctx = get_context('spawn')
                     pool = ctx.Pool(
                         processes=cores,
-                        initializer=_init_worker,
+                        initializer=_composite_worker_init,
                         initargs=(model_settings.pg_conn_string, model_settings.role)
                     )
 

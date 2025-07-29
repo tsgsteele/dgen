@@ -19,8 +19,8 @@ RUN chown -R dgen: /opt/dgen_os /data
 RUN find /opt/dgen_os/ -type d -exec chmod u+rwx {} \;
 
 # Copy the states CSV lookup for full names
-COPY states.csv /opt/dgen_os/python/states.csv
-RUN chown dgen: /opt/dgen_os/python/states.csv
+COPY states.csv /opt/dgen_os/python/state_input_csvs/states.csv
+RUN chown dgen: /opt/dgen_os/python/state_input_csvs/states.csv
 
 # Make the scenario prep helper executable
 RUN chmod +x /opt/dgen_os/python/prepare_all_scenarios.py

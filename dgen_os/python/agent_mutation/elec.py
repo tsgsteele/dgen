@@ -528,29 +528,45 @@ def get_and_apply_agent_load_profiles(con, agent):
 
 #%%
 def get_and_apply_normalized_hourly_resource_solar(con, agent):
+    """
+    Returns a DataFrame with the solar_cf_profile and scale_offset for a given agent.
+    First checks the global resource_lookup loaded via parquet, and falls back to SQL if needed.
+    """
+    solar_re_9809_gid = agent.loc['solar_re_9809_gid']
+    tilt = agent.loc['tilt']
+    azimuth = agent.loc['azimuth']
+    key = (solar_re_9809_gid, tilt, azimuth)
 
-    inputs = locals().copy()
-    
-    inputs['solar_re_9809_gid'] = agent.loc['solar_re_9809_gid']
-    inputs['tilt'] = agent.loc['tilt']
-    inputs['azimuth'] = agent.loc['azimuth']
-    
-    sql = """SELECT solar_re_9809_gid, tilt, azimuth,
-                    cf as generation_hourly,
-                    1e6 as scale_offset
-            FROM diffusion_resource_solar.solar_resource_hourly
+    # Try global cache first (loaded in _init_worker)
+    if 'resource_lookup' in globals():
+        try:
+            df = resource_lookup[key].copy()
+            df.rename(columns={'generation_hourly': 'solar_cf_profile'}, inplace=True)
+            return df
+        except KeyError:
+            pass  # fallback to SQL below
+
+    else:
+        print("Resource lookup not found, falling back to SQL query.")
+        # Fallback to SQL query (should be rare)
+        inputs = {
+            'solar_re_9809_gid': solar_re_9809_gid,
+            'tilt': tilt,
+            'azimuth': azimuth
+        }
+
+        sql = """SELECT solar_re_9809_gid, tilt, azimuth,
+                        cf as generation_hourly,
+                        1e6 as scale_offset
+                FROM diffusion_resource_solar.solar_resource_hourly
                 WHERE solar_re_9809_gid = '{solar_re_9809_gid}'
                 AND tilt = '{tilt}'
                 AND azimuth = '{azimuth}';""".format(**inputs)
 
-    df = pd.read_sql(sql, con, coerce_float=False)
-
-    df = df[['generation_hourly', 'scale_offset']]
-
-    # rename the column generation_hourly to solar_cf_profile
-    df.rename(columns={'generation_hourly':'solar_cf_profile'}, inplace=True)
-          
-    return df
+        df = pd.read_sql(sql, con, coerce_float=False)
+        df = df[['generation_hourly', 'scale_offset']]
+        df.rename(columns={'generation_hourly': 'solar_cf_profile'}, inplace=True)
+        return df
 
 
 #%%
@@ -1014,3 +1030,27 @@ def reassign_agent_tariffs(dataframe, con):
     dataframe = dataframe.set_index('agent_id')
 
     return dataframe
+
+resource_lookup = None
+
+def _init_worker_resource_lookup():
+    global resource_lookup
+    try:
+        parquet_path = '/tmp/resource_profiles.parquet'
+        if os.path.exists(parquet_path):
+            df = pd.read_parquet(parquet_path)
+            resource_lookup = {
+                (int(row['solar_re_9809_gid']), float(row['tilt']), row['azimuth']):
+                    pd.DataFrame([{
+                        'solar_cf_profile': row['generation_hourly'],
+                        'scale_offset': row['scale_offset']
+                    }])
+                for _, row in df.iterrows()
+            }
+            print(f"[Worker] Loaded {len(resource_lookup)} solar resource profiles into memory.", flush=True)
+        else:
+            resource_lookup = {}
+            print("[Worker] No resource profile parquet found at /tmp/resource_profiles.parquet.", flush=True)
+    except Exception as e:
+        resource_lookup = {}
+        print(f"[Worker] Failed to load resource profiles: {e}", flush=True)
