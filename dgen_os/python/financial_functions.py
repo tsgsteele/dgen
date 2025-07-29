@@ -257,6 +257,7 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
     agent.loc['naep'] = float(gen.sum())
     del norm
     solar_resource_total_time = time.time() - t_solar_start
+    print(f"[DEBUG] cf_profile type: {type(cf_profile)}, length: {len(cf_profile)}")
 
     pv = {
         'consumption_hourly': cons,

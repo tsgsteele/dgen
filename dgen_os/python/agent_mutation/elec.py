@@ -546,27 +546,27 @@ def get_and_apply_normalized_hourly_resource_solar(con, agent):
         except KeyError:
             pass  # fallback to SQL below
 
-    else:
-        print("Resource lookup not found, falling back to SQL query.")
-        # Fallback to SQL query (should be rare)
-        inputs = {
-            'solar_re_9809_gid': solar_re_9809_gid,
-            'tilt': tilt,
-            'azimuth': azimuth
-        }
+    # Always fall back to SQL if cache fails or doesn't exist
+    print("Using SQL query to get solar resource data")
 
-        sql = """SELECT solar_re_9809_gid, tilt, azimuth,
-                        cf as generation_hourly,
-                        1e6 as scale_offset
-                FROM diffusion_resource_solar.solar_resource_hourly
-                WHERE solar_re_9809_gid = '{solar_re_9809_gid}'
-                AND tilt = '{tilt}'
-                AND azimuth = '{azimuth}';""".format(**inputs)
+    inputs = {
+        'solar_re_9809_gid': solar_re_9809_gid,
+        'tilt': tilt,
+        'azimuth': azimuth
+    }
 
-        df = pd.read_sql(sql, con, coerce_float=False)
-        df = df[['generation_hourly', 'scale_offset']]
-        df.rename(columns={'generation_hourly': 'solar_cf_profile'}, inplace=True)
-        return df
+    sql = """SELECT solar_re_9809_gid, tilt, azimuth,
+                    cf as generation_hourly,
+                    1e6 as scale_offset
+            FROM diffusion_resource_solar.solar_resource_hourly
+            WHERE solar_re_9809_gid = '{solar_re_9809_gid}'
+              AND tilt = '{tilt}'
+              AND azimuth = '{azimuth}';""".format(**inputs)
+
+    df = pd.read_sql(sql, con, coerce_float=False)
+    df = df[['generation_hourly', 'scale_offset']]
+    df.rename(columns={'generation_hourly': 'solar_cf_profile'}, inplace=True)
+    return df
 
 
 #%%
