@@ -70,4 +70,4 @@ taskGroups:
       computeResource:
         cpuMilli: 8000            # 8 vCPUs
         memoryMib: 16384           # 16 GiB
-        bootDiskMib: 100         # 100 mb boot disk
+        bootDiskMib: 10000         # 10 gb boot disk
