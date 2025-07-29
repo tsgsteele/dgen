@@ -206,6 +206,7 @@ def make_engine(pg_engine_con):
                 user=user,
                 password=password,
                 db=dbname,
+                ip_type=IPTypes.PRIVATE
             )
 
         print(f"[make_engine] Using Cloud SQL Connector for engine", flush=True)
