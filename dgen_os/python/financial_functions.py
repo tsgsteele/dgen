@@ -257,13 +257,15 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
     agent.loc['naep'] = float(gen.sum())
     del norm
     solar_resource_total_time = time.time() - t_solar_start
-    print(f"[DEBUG] cf_profile type: {type(cf_profile)}, length: {len(cf_profile)}")
 
     pv = {
         'consumption_hourly': cons,
         'generation_hourly': gen
     }
 
+    pysam_setup_time = 0.0
+    optimize_time = 0.0
+    t_setup = time.time()
     # ——— 2+3) PySAM setup (moved *outside* optimizer loop) ———
     # instantiate once per agent:
     if agent.loc['sector_abbr'] == 'res':
@@ -348,6 +350,9 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
     loan.SystemOutput.degradation                           = [agent.loc['pv_degradation_factor'] * 100]
     loan.Lifetime.system_use_lifetime_output                = 0
 
+    pysam_setup_time = time.time() - t_setup
+
+    t_opt = time.time()
     # ——— 4) Optimize ———
     max_load   = agent.loc['load_kwh_per_customer_in_bin'] / agent.loc['naep']
     max_roof   = agent.loc['developable_roof_sqft'] * agent.loc['pv_kw_per_sqft']
@@ -392,6 +397,7 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
     out_n_util = utilityrate.Outputs.export()
     gen_n      = np.sum(utilityrate.SystemOutput.gen)
     npv_n      = out_n_loan['npv']
+    optimize_time = time.time() - t_opt
 
     if npv_w >= npv_n:
         system_kw     = res_w.x
@@ -466,7 +472,7 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
     ]
 
     cur.close()
-    return agent, load_profiles_total_time, solar_resource_total_time
+    return agent, load_profiles_total_time, solar_resource_total_time, pysam_setup_time, optimize_time
 
 
 
@@ -1128,13 +1134,15 @@ def size_chunk(static_agents_df, sectors, rate_switch_table):
     load_profile_time = 0.0
     solar_resource_time = 0.0
     sizing_time = 0.0
+    pysam_setup_total = 0.0
+    optimize_total = 0.0
 
     for aid, row in static_agents_df.iterrows():
         agent = row.copy()
         agent.name = aid
 
         t0 = time.time()
-        sized, lp_time, solar_time = calc_system_size_and_performance(
+        sized, lp_time, solar_time, setup_time, opt_time = calc_system_size_and_performance(
             _worker_conn,
             agent,
             sectors,
@@ -1143,6 +1151,8 @@ def size_chunk(static_agents_df, sectors, rate_switch_table):
         sizing_time += time.time() - t0
         load_profile_time += lp_time
         solar_resource_time += solar_time
+        pysam_setup_total += setup_time
+        optimize_total += opt_time
 
         results.append(sized)
 
@@ -1152,6 +1162,8 @@ def size_chunk(static_agents_df, sectors, rate_switch_table):
         f"[size_chunk] Completed {n_agents} agents in {chunk_total_time:.2f}s: "
         f"Load profiles = {load_profile_time:.2f}s, "
         f"Solar = {solar_resource_time:.2f}s, "
+        f"PySAM setup = {pysam_setup_total:.2f}s, "
+        f"Optimize = {optimize_total:.2f}s, "
         f"Sizing = {sizing_time:.2f}s",
         flush=True
     )
