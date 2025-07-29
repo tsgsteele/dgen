@@ -300,7 +300,7 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
 
                 # ── parallel system‐sizing ──
                 if os.name == 'posix':
-                    cores = 6
+                    cores = model_settings.local_cores
                 else:
                     cores = None
                 print(f"Using {cores} cores for parallel processing", flush=True)
