@@ -230,7 +230,7 @@ def calc_system_performance(kw, pv, utilityrate, loan, batt, costs, agent, rate_
     return -loan.Outputs.npv
 
 
-def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None):
+def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None, timing_dict=None):
     """
     Calculate the optimal system and battery size and generation profile, and resulting bill savings and financial metrics.
     """
@@ -352,8 +352,18 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
 
     pysam_setup_time = time.time() - t_setup
 
-    t_opt = time.time()
     # ——— 4) Optimize ———
+    if timing_dict is None:
+        timing_dict = {
+            'bounds': 0.0,
+            'freeze': 0.0,
+            'opt_w': 0.0,
+            'extract_w': 0.0,
+            'opt_n': 0.0,
+            'extract_n': 0.0
+        }
+
+    t_bounds = time.time()
     max_load   = agent.loc['load_kwh_per_customer_in_bin'] / agent.loc['naep']
     max_roof   = agent.loc['developable_roof_sqft'] * agent.loc['pv_kw_per_sqft']
     max_system = min(max_load, max_roof)
@@ -361,43 +371,55 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
     batt_disp  = 'peak_shaving' if agent.loc['sector_abbr'] != 'res' else 'price_signal_forecast'
     low        = min(3, max_system)
     high       = max_system
+    timing_dict['bounds'] += time.time() - t_bounds
 
-    # freeze your three modules + static inputs into two 1-D functions:
+    t_freeze = time.time()
     def perf_with_batt(x):
         return calc_system_performance(
             x, pv, utilityrate, loan, batt, sc, agent, rate_switch_table, True, batt_disp
         )
     def perf_no_batt(x):
-        # skip PySAM if near zero
         if x < 1e-3:
-            return float('inf')   # force the optimizer away from battery
+            return float('inf')
         return calc_system_performance(
             x, pv, utilityrate, loan, batt, sc, agent, rate_switch_table, False, 0
         )
+    timing_dict['freeze'] += time.time() - t_freeze
 
-    # run the two scalar minimizations:
-    res_w = optimize.minimize_scalar(perf_with_batt,
-                                     bounds=(low,   high),
-                                     method='bounded',
-                                     options={'xatol': max(4, tol)})
+    t_opt_w = time.time()
+    res_w = optimize.minimize_scalar(
+        perf_with_batt,
+        bounds=(low, high),
+        method='bounded',
+        options={'xatol': max(4, tol)}
+    )
+    timing_dict['opt_w'] += time.time() - t_opt_w
+
+    t_extract_w = time.time()
     out_w_loan = loan.Outputs.export()
     out_w_util = utilityrate.Outputs.export()
     gen_w      = np.sum(utilityrate.SystemOutput.gen)
     kw_w       = batt.BatterySystem.batt_power_charge_max_kwdc
     kwh_w      = batt.Outputs.batt_bank_installed_capacity
-    disp_w     = (batt.Outputs.batt_power.tolist()
-                  if hasattr(batt.Outputs.batt_power, 'tolist') else [])
+    disp_w     = batt.Outputs.batt_power.tolist() if hasattr(batt.Outputs.batt_power, 'tolist') else []
     npv_w      = out_w_loan['npv']
+    timing_dict['extract_w'] += time.time() - t_extract_w
 
-    res_n = optimize.minimize_scalar(perf_no_batt,
-                                     bounds=(high*.5, high),
-                                     method='bounded',
-                                     options={'xatol': max(4, tol)})
+    t_opt_n = time.time()
+    res_n = optimize.minimize_scalar(
+        perf_no_batt,
+        bounds=(high * 0.5, high),
+        method='bounded',
+        options={'xatol': max(4, tol)}
+    )
+    timing_dict['opt_n'] += time.time() - t_opt_n
+
+    t_extract_n = time.time()
     out_n_loan = loan.Outputs.export()
     out_n_util = utilityrate.Outputs.export()
     gen_n      = np.sum(utilityrate.SystemOutput.gen)
     npv_n      = out_n_loan['npv']
-    optimize_time = time.time() - t_opt
+    timing_dict['extract_n'] += time.time() - t_extract_n
 
     if npv_w >= npv_n:
         system_kw     = res_w.x
@@ -1137,6 +1159,16 @@ def size_chunk(static_agents_df, sectors, rate_switch_table):
     pysam_setup_total = 0.0
     optimize_total = 0.0
 
+    # New dict for breaking out parts of optimization
+    optimize_timing = {
+        'bounds': 0.0,
+        'freeze': 0.0,
+        'opt_w': 0.0,
+        'extract_w': 0.0,
+        'opt_n': 0.0,
+        'extract_n': 0.0
+    }
+
     for aid, row in static_agents_df.iterrows():
         agent = row.copy()
         agent.name = aid
@@ -1146,7 +1178,8 @@ def size_chunk(static_agents_df, sectors, rate_switch_table):
             _worker_conn,
             agent,
             sectors,
-            rate_switch_table
+            rate_switch_table,
+            timing_dict=optimize_timing
         )
         sizing_time += time.time() - t0
         load_profile_time += lp_time
@@ -1167,6 +1200,14 @@ def size_chunk(static_agents_df, sectors, rate_switch_table):
         f"Sizing = {sizing_time:.2f}s",
         flush=True
     )
+
+    print("  > Optimization breakdown: "
+          f"bounds = {optimize_timing['bounds']:.2f}s, "
+          f"freeze = {optimize_timing['freeze']:.2f}s, "
+          f"opt_w = {optimize_timing['opt_w']:.2f}s, "
+          f"extract_w = {optimize_timing['extract_w']:.2f}s, "
+          f"opt_n = {optimize_timing['opt_n']:.2f}s, "
+          f"extract_n = {optimize_timing['extract_n']:.2f}s")
 
     return pd.DataFrame(results)
 
