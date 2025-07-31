@@ -11,7 +11,7 @@ JOB_NAME="dgen-small-states-${JOB_TS}"
 gcloud batch jobs submit "${JOB_NAME}" \
   --location="${LOCATION}" \
   --config="batch_job_yamls/dgen-batch-job-small-states.yaml" \
-  --machine-type="c2d-highcpu-16" \
+  --machine-type="c2d-highcpu-8" \
   --provisioning-model="SPOT"
 
 # Define job name with timestamp
@@ -25,11 +25,21 @@ gcloud batch jobs submit "${JOB_NAME}" \
   --provisioning-model="SPOT"
 
 # Define job name with timestamp
-JOB_NAME="dgen-large-states-${JOB_TS}"
+JOB_NAME="dgen-mid-large-states-${JOB_TS}"
 
 # submit the third job
 gcloud batch jobs submit "${JOB_NAME}" \
   --location="${LOCATION}" \
-  --config="batch_job_yamls/dgen-batch-job-large-states.yaml" \
+  --config="batch_job_yamls/dgen-batch-job-mid-large-states.yaml" \
   --machine-type="c2d-highcpu-32"  \
+  --provisioning-model="SPOT"
+
+# Define job name with timestamp
+JOB_NAME="dgen-large-states-${JOB_TS}"
+
+# submit the last job
+gcloud batch jobs submit "${JOB_NAME}" \
+  --location="${LOCATION}" \
+  --config="batch_job_yamls/dgen-batch-job-large-states.yaml" \
+  --machine-type="c2d-highcpu-56"  \
   --provisioning-model="SPOT"

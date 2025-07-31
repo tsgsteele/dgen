@@ -3,10 +3,11 @@ logsPolicy:
 
 taskGroups:
   - taskCount: "3"               # one task per state
-    parallelism: "3"             # run all states in parallel
+    parallelism: "2"             # run all states in parallel
     schedulingPolicy: AS_SOON_AS_POSSIBLE
 
     taskSpec:
+      maxRetryCount: 3  
       environment:
         variables:
           DB_USER: "postgres"
@@ -57,7 +58,7 @@ taskGroups:
                 --templates-dir /opt/dgen_os/input_scenarios \
                 --output-dir    /opt/dgen_os/input_scenarios \
                 --states-file   /tmp/state_${IDX}.csv \
-                --end-year      2026
+                --end-year      2040
 
               # 4) Remove the raw templates so only your two new files remain
               rm /opt/dgen_os/input_scenarios/baseline.xlsm
@@ -70,4 +71,4 @@ taskGroups:
       computeResource:
         cpuMilli: 16000            # 16 vCPUs
         memoryMib: 32768           # 32 GiB
-        bootDiskMib: 100         # 100 mb boot disk
+        bootDiskMib: 100000         # 100 mb boot disk

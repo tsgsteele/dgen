@@ -46,7 +46,7 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
 
     if isinstance(con, psycopg2.extensions.connection):
         pgx.register_hstore(con)
-    logger.info(f"Connected to Postgres with: {model_settings.pg_params_log}")
+        logger.info(f"Connected to Postgres with: {model_settings.pg_params_log}")
     owner = model_settings.role
 
     scenario_names = []
@@ -131,24 +131,43 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                     con=engine,
                     schema="diffusion_shared"
                 )
+                # ADJUST PRICES BASED ON SCENARIO
+                if "baseline" in scenario_settings.schema:
+                    pv_price_traj = pd.read_sql_table(
+                        "pv_price_baseline",
+                        con=engine,
+                        schema="diffusion_shared"
+                    )
 
-                pv_price_traj = pd.read_sql_table(
-                    "pv_price_atb23_mid",
-                    con=engine,
-                    schema="diffusion_shared"
-                )
+                    batt_price_traj = pd.read_sql_table(
+                        "batt_prices_baseline",
+                        con=engine,
+                        schema="diffusion_shared"
+                    )
 
-                batt_price_traj = pd.read_sql_table(
-                    "batt_prices_FY23_mid",
-                    con=engine,
-                    schema="diffusion_shared"
-                )
+                    pv_plus_batt_price_traj = pd.read_sql_table(
+                        "pv_plus_batt_baseline",
+                        con=engine,
+                        schema="diffusion_shared"
+                    )
+                else:    
+                    pv_price_traj = pd.read_sql_table(
+                        "pv_price_dollar_per_watt",
+                        con=engine,
+                        schema="diffusion_shared"
+                    )
 
-                pv_plus_batt_price_traj = pd.read_sql_table(
-                    "pv_plus_batt_prices_FY23_mid",
-                    con=engine,
-                    schema="diffusion_shared"
-                )
+                    batt_price_traj = pd.read_sql_table(
+                        "batt_prices_dollar_per_watt",
+                        con=engine,
+                        schema="diffusion_shared"
+                    )
+
+                    pv_plus_batt_price_traj = pd.read_sql_table(
+                        "pv_plus_batt_dollar_per_watt",
+                        con=engine,
+                        schema="diffusion_shared"
+                    )
 
                 financing_terms = pd.read_sql_table(
                     "financing_atb_FY23",
@@ -157,7 +176,7 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                 )
 
                 batt_tech_traj = pd.read_sql_table(
-                    "batt_tech_performance_SunLamp17",
+                    "batt_tech_performance_FY19",
                     con=engine,
                     schema="diffusion_shared"
                 )
@@ -225,7 +244,7 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                                        [net_metering_state_df, net_metering_utility_df])
                 solar_agents.on_frame(agent_mutation.elec.apply_elec_price_multiplier_and_escalator,
                                        [year, elec_price_change_traj])
-                solar_agents.on_frame(agent_mutation.elec.apply_batt_tech_performance,
+                solar_agents.on_frame(agent_mutation.elec.apply_batt_tech_performance, 
                                        [batt_tech_traj])
                 solar_agents.on_frame(agent_mutation.elec.apply_pv_tech_performance,
                                        [pv_tech_traj])
