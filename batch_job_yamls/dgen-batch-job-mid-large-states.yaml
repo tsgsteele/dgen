@@ -20,8 +20,7 @@ taskGroups:
             dbname=dgendb
             user=postgres
             password=postgres
-          LOCAL_CORES: "56"
-
+          LOCAL_CORES: "32"
 
       runnables:
       - container:
@@ -40,11 +39,11 @@ taskGroups:
               # 1) Fetch templates & state list
               python /opt/dgen_os/python/fetch_files.py dgen-assets input_scenarios/baseline.xlsm /opt/dgen_os/input_scenarios/baseline.xlsm
               python /opt/dgen_os/python/fetch_files.py dgen-assets input_scenarios/policy.xlsm   /opt/dgen_os/input_scenarios/policy.xlsm
-              python /opt/dgen_os/python/fetch_files.py dgen-assets large_states_test.csv                /tmp/large_states_test.csv
+              python /opt/dgen_os/python/fetch_files.py dgen-assets mid_large_states_test.csv                /tmp/mid_large_states_test.csv
 
               # 2) Pick *this* task’s state
               IDX=${BATCH_TASK_INDEX}
-              STATE_LINE=$(sed -n "$((IDX+1))p" /tmp/large_states_test.csv)
+              STATE_LINE=$(sed -n "$((IDX+1))p" /tmp/mid_large_states_test.csv)
               IFS=',' read -r ABBR FULLNAME <<< "${STATE_LINE}"
               echo "[Task $IDX] Running for state=${FULLNAME} (abbr=${ABBR})"
 
@@ -70,6 +69,6 @@ taskGroups:
               python /opt/dgen_os/python/dgen_model.py
 
       computeResource:
-        cpuMilli: 56000            #16 vCPUs
-        memoryMib: 114688           # 32 GiB
-        bootDiskMib: 100000         # 100 gb boot disk
+        cpuMilli: 32000            # 32 vCPUs
+        memoryMib: 65536           # 64 GiB
+        bootDiskMib: 100000         # 100 mb boot disk

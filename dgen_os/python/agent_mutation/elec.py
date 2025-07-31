@@ -96,6 +96,11 @@ def apply_export_tariff_params(dataframe, net_metering_state_df, net_metering_ut
     # specify relevant NEM columns
     nem_columns = ['compensation_style','nem_system_kw_limit']
     net_metering_utility_df = net_metering_utility_df[['eia_id','sector_abbr','state_abbr']+nem_columns]
+
+    # Drop duplicates
+    net_metering_utility_df = net_metering_utility_df.drop_duplicates(subset=['eia_id','sector_abbr','state_abbr'])
+    net_metering_state_df = net_metering_state_df.drop_duplicates(subset=['state_abbr', 'sector_abbr'])
+
     # check if utility-specific NEM parameters apply to any agents - need to join on state too (e.g. Pacificorp UT vs Pacificorp ID)
     temp_df = pd.merge(dataframe, net_metering_utility_df, how='left', on=['eia_id','sector_abbr','state_abbr'])
     
@@ -115,6 +120,7 @@ def apply_export_tariff_params(dataframe, net_metering_state_df, net_metering_ut
     
     dataframe = dataframe.set_index('agent_id')
     # dataframe = dataframe.drop_duplicates(subset=dataframe.columns.difference(['tariff_dict']))
+    dataframe.to_csv("kentuck_test.csv", index=False)
     return dataframe
 
 
