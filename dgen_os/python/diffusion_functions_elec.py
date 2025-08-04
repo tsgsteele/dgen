@@ -86,7 +86,7 @@ def calc_diffusion_solar(df, is_first_year, bass_params, year,
     df['batt_kwh_cum'] = df['batt_kwh_cum_last_year'] + df['new_batt_kwh']
     
     # constrain state-level capacity totals to known historical values
-    if year in (2014, 2016, 2018):
+    if year in (2014,2016,2018):
         group_cols = ['state_abbr', 'sector_abbr', 'year']
         state_capacity_total = (df[group_cols+['system_kw_cum', 'batt_kw_cum', 'batt_kwh_cum', 'agent_id']].groupby(group_cols)
                                                                             .agg({'system_kw_cum':'sum', 'batt_kw_cum':'sum', 'batt_kwh_cum':'sum', 'agent_id':'count'})
