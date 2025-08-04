@@ -227,7 +227,7 @@ def calc_system_performance(kw, pv, utilityrate, loan, batt, costs, agent, rate_
     # Execute financial module 
     loan.execute()
 
-    return -loan.Outputs.npv
+    return loan.Outputs.payback
 
 
 def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None):
@@ -373,29 +373,37 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
     max_load   = agent.loc['load_kwh_per_customer_in_bin'] / agent.loc['naep']
     max_roof   = agent.loc['developable_roof_sqft'] * agent.loc['pv_kw_per_sqft']
     max_system = min(max_load, max_roof)
-    tol        = min(0.25 * max_system, 0.5)
+    tol        = min(0.25 * max_system, 0.25)
     batt_disp  = 'peak_shaving' if agent.loc['sector_abbr'] != 'res' else 'price_signal_forecast'
-    low        = min(3, max_system)
-    high       = max_system
+    if max_system >= 3:
+        low = 3
+    else:
+        low = max(0.01, max_system * 0.9) 
+    high = max_system
 
     # freeze your three modules + static inputs into two 1-D functions:
     def perf_with_batt(x):
-        return calc_system_performance(
-            x, pv, utilityrate, loan, batt, sc, agent, rate_switch_table, True, batt_disp
-        )
+        try:
+            p = calc_system_performance(
+                x, pv, utilityrate, loan, batt, sc, agent, rate_switch_table, True, batt_disp
+            )
+            return p if p is not None else 30.1
+        except:
+            30.1
     def perf_no_batt(x):
-        # skip PySAM if near zero
-        if x < 1e-3:
-            return float('inf')   # force the optimizer away from battery
-        return calc_system_performance(
-            x, pv, utilityrate, loan, batt, sc, agent, rate_switch_table, False, 0
-        )
+        try: 
+            p = calc_system_performance(
+                x, pv, utilityrate, loan, batt, sc, agent, rate_switch_table, False, 0
+            )
+            return p if p is not None else 30.1
+        except:
+            30.1
 
     # run the two scalar minimizations:
     res_w = optimize.minimize_scalar(perf_with_batt,
-                                     bounds=(low,   high),
+                                     bounds=(low, high),
                                      method='bounded',
-                                     options={'xatol': max(4, tol)})
+                                     options={'xatol': max(2, tol)})
     out_w_loan = loan.Outputs.export()
     out_w_util = utilityrate.Outputs.export()
     gen_w      = np.sum(utilityrate.SystemOutput.gen)
@@ -406,9 +414,9 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
     npv_w      = out_w_loan['npv']
 
     res_n = optimize.minimize_scalar(perf_no_batt,
-                                     bounds=(high*.5, high),
+                                     bounds=(low, high),
                                      method='bounded',
-                                     options={'xatol': max(4, tol)})
+                                     options={'xatol': max(2, tol)})
     out_n_loan = loan.Outputs.export()
     out_n_util = utilityrate.Outputs.export()
     gen_n      = np.sum(utilityrate.SystemOutput.gen)
