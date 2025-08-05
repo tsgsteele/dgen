@@ -23,7 +23,7 @@ logger = utilfunc.get_logger()
 
 
 #%%
-def calc_system_performance(kw, pv, utilityrate, loan, batt, costs, agent, rate_switch_table, en_batt=True, batt_dispatch='price_signal_forecast'):
+def calc_system_performance(kw, pv, utilityrate, loan, batt, costs, agent, rate_switch_table, en_batt=True, batt_dispatch='self_consumption'):
     """
     Executes Battwatts, Utilityrate5, and Cashloan PySAM modules with system sizes (kw) as input
     
@@ -89,10 +89,10 @@ def calc_system_performance(kw, pv, utilityrate, loan, batt, costs, agent, rate_
         if batt_dispatch =='peak_shaving':
             batt.BatteryDispatch.batt_dispatch_choice = 0
         else:
-            batt.BatteryDispatch.batt_dispatch_choice = 4
+            batt.BatteryDispatch.batt_dispatch_choice = 5
         batt.BatteryDispatch.batt_dispatch_auto_can_charge = 1
         batt.BatteryDispatch.batt_dispatch_auto_can_clipcharge = 1
-        batt.BatteryDispatch.batt_dispatch_auto_can_gridcharge = 1
+        batt.BatteryDispatch.batt_dispatch_auto_can_gridcharge = 0
         cycle_cost_list = [0.1]
         batt.BatteryDispatch.batt_cycle_cost = cycle_cost_list
         batt.BatteryDispatch.batt_cycle_cost_choice = 0
@@ -377,7 +377,7 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
     max_roof   = agent.loc['developable_roof_sqft'] * agent.loc['pv_kw_per_sqft']
     max_system = min(max_load, max_roof)
     tol        = min(0.25 * max_system, 0.25)
-    batt_disp  = 'price_signal_forecast'
+    batt_disp  = 'self_consumption'
     if max_system >= 3:
         low = 3
     else:
