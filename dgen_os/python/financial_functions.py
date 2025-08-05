@@ -70,8 +70,8 @@ def calc_system_performance(kw, pv, utilityrate, loan, batt, costs, agent, rate_
         batt.BatterySystem.batt_replacement_option = 0
 
         # PV to Battery ratio (kW) - From Ashreeta, 02/08/2020
-        pv_to_batt_ratio = 1.31372
-        batt_capacity_to_power_ratio = 2 # hours of operation
+        pv_to_batt_ratio = 1
+        batt_capacity_to_power_ratio = 4 # hours of operation
         
         desired_size = kw / pv_to_batt_ratio # Default SAM value for residential systems is 10 
         desired_power = desired_size / batt_capacity_to_power_ratio
@@ -106,6 +106,7 @@ def calc_system_performance(kw, pv, utilityrate, loan, batt, costs, agent, rate_
             one_time_charge = 0.
               
         # declare value for net billing sell rate
+        agent.loc['compensation_style'] == 'net billing'
         if agent.loc['compensation_style']=='none':
             net_billing_sell_rate = 0.
         else:
@@ -175,6 +176,7 @@ def calc_system_performance(kw, pv, utilityrate, loan, batt, costs, agent, rate_
             one_time_charge = 0.
 
         # declare value for net billing sell rate
+        agent.loc['compensation_style'] == 'net billing'
         if agent.loc['compensation_style']=='none':
             net_billing_sell_rate = 0.
         else:
@@ -298,6 +300,7 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
     # Apply one time parameter settings to utilityrate
     tariff_dict = agent.loc['tariff_dict']
     style       = "net billing"
+    agent['compensation_style'] = style
     net_sell = agent.loc['wholesale_elec_price_dollars_per_kwh'] * agent.loc['elec_price_multiplier']
     nem_opts    = {'net metering': 0, 'net billing': 2, 'buy all sell all': 4, 'none': 2}
 
@@ -374,11 +377,11 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
     max_roof   = agent.loc['developable_roof_sqft'] * agent.loc['pv_kw_per_sqft']
     max_system = min(max_load, max_roof)
     tol        = min(0.25 * max_system, 0.25)
-    batt_disp  = 'peak_shaving' if agent.loc['sector_abbr'] != 'res' else 'price_signal_forecast'
+    batt_disp  = 'price_signal_forecast'
     if max_system >= 3:
         low = 3
     else:
-        low = max(0.01, max_system * 0.9) 
+        low = max(0.01, max_system * 0.5) 
     high = max_system
 
     # freeze your three modules + static inputs into two 1-D functions:
