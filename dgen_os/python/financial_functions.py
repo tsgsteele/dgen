@@ -297,8 +297,8 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
 
     # now apply all your one-time parameter settings on utilityrate & loan exactly as before:
     tariff_dict = agent.loc['tariff_dict']
-    style       = agent.loc['compensation_style']
-    net_sell    = 0. if style == 'none' else agent.loc['wholesale_elec_price_dollars_per_kwh'] * agent.loc['elec_price_multiplier']
+    style       = "net billing"
+    net_sell = agent.loc['wholesale_elec_price_dollars_per_kwh'] * agent.loc['elec_price_multiplier']
     nem_opts    = {'net metering': 0, 'net billing': 2, 'buy all sell all': 4, 'none': 2}
 
     utilityrate.Lifetime.inflation_rate            = agent.loc['inflation_rate'] * 100
