@@ -106,7 +106,7 @@ def calc_system_performance(kw, pv, utilityrate, loan, batt, costs, agent, rate_
             one_time_charge = 0.
               
         # declare value for net billing sell rate
-        agent.loc['compensation_style'] == 'net billing'
+        agent.loc['compensation_style'] == 'net metering'
         if agent.loc['compensation_style']=='none':
             net_billing_sell_rate = 0.
         else:
@@ -176,7 +176,7 @@ def calc_system_performance(kw, pv, utilityrate, loan, batt, costs, agent, rate_
             one_time_charge = 0.
 
         # declare value for net billing sell rate
-        agent.loc['compensation_style'] == 'net billing'
+        agent.loc['compensation_style'] == 'net metering'
         if agent.loc['compensation_style']=='none':
             net_billing_sell_rate = 0.
         else:
@@ -229,7 +229,7 @@ def calc_system_performance(kw, pv, utilityrate, loan, batt, costs, agent, rate_
     # Execute financial module 
     loan.execute()
 
-    return loan.Outputs.payback
+    return -loan.Outputs.npv
 
 
 def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None):
@@ -299,7 +299,7 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
 
     # Apply one time parameter settings to utilityrate
     tariff_dict = agent.loc['tariff_dict']
-    style       = "net billing"
+    style       = "net metering"
     agent['compensation_style'] = style
     net_sell = agent.loc['wholesale_elec_price_dollars_per_kwh'] * agent.loc['elec_price_multiplier']
     nem_opts    = {'net metering': 0, 'net billing': 2, 'buy all sell all': 4, 'none': 2}
