@@ -277,11 +277,11 @@ def calc_diffusion_market_share(df, is_first_year):
        
     df = calc_equiv_time(df); # find the 'equivalent time' on the newly scaled diffusion curve
     if is_first_year == True:
-        df['teq2'] = df['bass_params_teq'] + df['teq_yr1']
+        df['teq2'] = df['bass_params_teq'] + 1
     else:
-        df['teq2'] = df['bass_params_teq'] + 2 # now step forward two years from the 'new location'
+        df['teq2'] = df['bass_params_teq'] + 1 # now step forward one year from the 'new location'
     
-    df = bass_diffusion(df); # calculate the new diffusion by stepping forward 2 years
+    df = bass_diffusion(df); # calculate the new diffusion by stepping forward 1 year
 
     df['bass_market_share'] = df.max_market_share * df.new_adopt_fraction # new market adoption    
     df['diffusion_market_share'] = np.where(df.market_share_last_year > df.bass_market_share, df.market_share_last_year, df.bass_market_share)
