@@ -295,7 +295,7 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
         loan = cashloan.from_existing(utilityrate, "GenericBatteryCommercial")
         loan.FinancialParameters.market = 1
 
-    # now apply all your one-time parameter settings on utilityrate & loan exactly as before:
+    # Apply one time parameter settings to utilityrate
     tariff_dict = agent.loc['tariff_dict']
     style       = "net billing"
     net_sell = agent.loc['wholesale_elec_price_dollars_per_kwh'] * agent.loc['elec_price_multiplier']
