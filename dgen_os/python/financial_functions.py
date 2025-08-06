@@ -15,7 +15,7 @@ import PySAM.BatteryTools as battery_tools
 import PySAM.Utilityrate5 as utility
 import PySAM.Cashloan as cashloan
 
-
+hourly_prices = pd.read_csv("../../data/hourly_prices.csv")
 #==============================================================================
 # Load logger
 logger = utilfunc.get_logger()
@@ -89,7 +89,7 @@ def calc_system_performance(kw, pv, utilityrate, loan, batt, costs, agent, rate_
         if batt_dispatch =='peak_shaving':
             batt.BatteryDispatch.batt_dispatch_choice = 0
         else:
-            batt.BatteryDispatch.batt_dispatch_choice = 4
+            batt.BatteryDispatch.batt_dispatch_choice = 5
         batt.BatteryDispatch.batt_dispatch_auto_can_charge = 1
         batt.BatteryDispatch.batt_dispatch_auto_can_clipcharge = 1
         batt.BatteryDispatch.batt_dispatch_auto_can_gridcharge = 1
@@ -227,7 +227,7 @@ def calc_system_performance(kw, pv, utilityrate, loan, batt, costs, agent, rate_
     # Execute financial module 
     loan.execute()
 
-    return loan.Outputs.payback
+    return -loan.Outputs.npv
 
 
 def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None):
@@ -307,10 +307,10 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
     utilityrate.SystemOutput.degradation            = [agent.loc['pv_degradation_factor'] * 100]
     utilityrate.ElectricityRates.rate_escalation    = [agent.loc['elec_price_escalator'] * 100]
 
-    utilityrate.ElectricityRates.ur_metering_option      = nem_opts[style]
+    utilityrate.ElectricityRates.ur_metering_option      = 2
     utilityrate.ElectricityRates.ur_nm_yearend_sell_rate = net_sell
-    utilityrate.ElectricityRates.ur_en_ts_sell_rate      = 0
-    utilityrate.ElectricityRates.ur_ts_sell_rate         = [0.]
+    utilityrate.ElectricityRates.ur_en_ts_sell_rate      = 1
+    utilityrate.ElectricityRates.ur_ts_sell_rate         = hourly_prices['prices']
     utilityrate.ElectricityRates.ur_sell_eq_buy          = 0
     utilityrate.ElectricityRates.TOU_demand_single_peak  = 0
     utilityrate.ElectricityRates.en_electricity_rates    = 1
@@ -422,6 +422,10 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
     gen_n      = np.sum(utilityrate.SystemOutput.gen)
     npv_n      = out_n_loan['npv']
     optimize_time = time.time() - t_opt
+
+    print("NPV with battery:", npv_w)
+    print("NPV without battery:", npv_n)
+
 
     if npv_w >= npv_n:
         system_kw     = res_w.x
