@@ -310,7 +310,7 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
     utilityrate.ElectricityRates.ur_metering_option      = 2
     utilityrate.ElectricityRates.ur_nm_yearend_sell_rate = net_sell
     utilityrate.ElectricityRates.ur_en_ts_sell_rate      = 1
-    utilityrate.ElectricityRates.ur_ts_sell_rate         = hourly_prices['prices']
+    utilityrate.ElectricityRates.ur_ts_sell_rate         = [agent.loc['wholesale_elec_price_dollars_per_kwh'] * agent.loc['elec_price_multiplier']]*8760
     utilityrate.ElectricityRates.ur_sell_eq_buy          = 0
     utilityrate.ElectricityRates.TOU_demand_single_peak  = 0
     utilityrate.ElectricityRates.en_electricity_rates    = 1
@@ -372,13 +372,10 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
     # ——— 4) Optimize ———
     max_load   = agent.loc['load_kwh_per_customer_in_bin'] / agent.loc['naep']
     max_roof   = agent.loc['developable_roof_sqft'] * agent.loc['pv_kw_per_sqft']
-    max_system = min(max_load, max_roof)
+    max_system = max(max_load, max_roof)
     tol        = min(0.25 * max_system, 0.25)
     batt_disp  = 'peak_shaving' if agent.loc['sector_abbr'] != 'res' else 'price_signal_forecast'
-    if max_system >= 3:
-        low = 3
-    else:
-        low = max(0.01, max_system * 0.9) 
+    low = max_system*.5
     high = max_system
 
     # freeze your three modules + static inputs into two 1-D functions:
