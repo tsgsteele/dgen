@@ -15,7 +15,7 @@ import PySAM.BatteryTools as battery_tools
 import PySAM.Utilityrate5 as utility
 import PySAM.Cashloan as cashloan
 
-hourly_prices = pd.read_csv("../../data/hourly_prices.csv")
+#hourly_prices = pd.read_csv("../../data/hourly_prices.csv")
 #==============================================================================
 # Load logger
 logger = utilfunc.get_logger()
@@ -89,15 +89,23 @@ def calc_system_performance(kw, pv, utilityrate, loan, batt, costs, agent, rate_
         if batt_dispatch =='peak_shaving':
             batt.BatteryDispatch.batt_dispatch_choice = 0
         else:
-            batt.BatteryDispatch.batt_dispatch_choice = 5
+            batt.BatteryDispatch.batt_dispatch_choice = 4
         batt.BatteryDispatch.batt_dispatch_auto_can_charge = 1
         batt.BatteryDispatch.batt_dispatch_auto_can_clipcharge = 1
-        batt.BatteryDispatch.batt_dispatch_auto_can_gridcharge = 1
-        cycle_cost_list = [0.1]
+        batt.BatteryDispatch.batt_dispatch_auto_can_gridcharge = 0
+        batt.batt_dispatch_auto_btm_can_discharge_to_grid = 1
+        cycle_cost_list = [0.]
         batt.BatteryDispatch.batt_cycle_cost = cycle_cost_list
         batt.BatteryDispatch.batt_cycle_cost_choice = 0
 
         batt.execute()
+        # print(f"Battery dispatch choice for {agent.loc['agent_id']}:", batt.BatteryDispatch.batt_dispatch_choice)
+        # print(f"Battery annual energy charged total for {agent.loc['agent_id']}:", batt.Outputs.batt_annual_charge_energy)
+        # print(f"Battery annual energy charged from grid for {agent.loc['agent_id']}:", batt.Outputs.batt_annual_charge_from_grid)
+        # print(f"Battery annual energy charged from system for {agent.loc['agent_id']}:", batt.Outputs.batt_annual_charge_from_system)
+        # print(f"Battery annual energy discharged for {agent.loc['agent_id']}:", batt.Outputs.batt_annual_discharge_energy)
+        # print(f"Battery exports to grid for {agent.loc['agent_id']}:", batt.Outputs.annual_export_to_grid_energy)
+
 
         # apply storage rate switch if computed_size is nonzero
         if batt.BatterySystem.batt_computed_bank_capacity > 0.:
@@ -154,8 +162,7 @@ def calc_system_performance(kw, pv, utilityrate, loan, batt, costs, agent, rate_
         #loan.SystemCosts.om_production1_values = [batt.Outputs.batt_bank_installed_capacity] # Use actual production from battery run for variable O&M
         loan.SystemCosts.om_production1_values = batt.Outputs.batt_annual_discharge_energy
  
-        batt_costs = ((costs['batt_capex_per_kw_combined']* batt.BatterySystem.batt_power_charge_max_kwdc) + 
-                      (costs['batt_capex_per_kwh_combined'] * batt.Outputs.batt_bank_installed_capacity))
+        batt_costs = ((costs['batt_capex_per_kwh_combined'] * batt.Outputs.batt_bank_installed_capacity))
         value_of_resiliency = agent.loc['value_of_resiliency_usd']
         
     else:
@@ -222,7 +229,7 @@ def calc_system_performance(kw, pv, utilityrate, loan, batt, costs, agent, rate_
     direct_costs = (system_costs + batt_costs) * costs['cap_cost_multiplier']
 
     sales_tax = 0.
-    loan.SystemCosts.total_installed_cost = direct_costs + linear_constant + sales_tax + one_time_charge
+    loan.SystemCosts.total_installed_cost = direct_costs + sales_tax + one_time_charge
     
     # Execute financial module 
     loan.execute()
@@ -315,6 +322,7 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
     utilityrate.ElectricityRates.TOU_demand_single_peak  = 0
     utilityrate.ElectricityRates.en_electricity_rates    = 1
 
+    utilityrate.ElectricityRates.ur_nm_yearend_sell_rate = net_sell
     utilityrate = process_tariff(utilityrate, tariff_dict, net_sell)
 
     loan.FinancialParameters.analysis_period               = agent.loc['economic_lifetime_yrs']
@@ -409,6 +417,7 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
     disp_w     = (batt.Outputs.batt_power.tolist()
                   if hasattr(batt.Outputs.batt_power, 'tolist') else [])
     npv_w      = out_w_loan['npv']
+    payback_w  = out_w_loan['payback'] if not np.isnan(out_w_loan['payback']) else 30.1
 
     res_n = optimize.minimize_scalar(perf_no_batt,
                                      bounds=(low, high),
@@ -418,13 +427,15 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
     out_n_util = utilityrate.Outputs.export()
     gen_n      = np.sum(utilityrate.SystemOutput.gen)
     npv_n      = out_n_loan['npv']
+    payback_n  = out_n_loan['payback'] if not np.isnan(out_n_loan['payback']) else 30.1
     optimize_time = time.time() - t_opt
 
-    print("NPV with battery:", npv_w)
-    print("NPV without battery:", npv_n)
+    print(f"Payback with battery for {agent.loc['agent_id']}:", payback_w)
+    print(f"Payback without battery for {agent.loc['agent_id']}:", payback_n)
+    # print(f"NPV with battery for {agent.loc['agent_id']}:", npv_w)
+    # print(f"NPV without battery {agent.loc['agent_id']}:", npv_n)
 
-
-    if npv_w >= npv_n:
+    if payback_w <= 10:
         system_kw     = res_w.x
         annual_kwh    = gen_w
         first_with    = out_w_util['elec_cost_with_system_year1']
