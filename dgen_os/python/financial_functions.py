@@ -15,13 +15,22 @@ import PySAM.BatteryTools as battery_tools
 import PySAM.Utilityrate5 as utility
 import PySAM.Cashloan as cashloan
 
-
+# Load hourly prices for test
+hourly_prices = pd.read_csv("../../data/hourly_prices.csv")
 #==============================================================================
 # Load logger
 logger = utilfunc.get_logger()
 #==============================================================================
 
-
+def approx_buy_ts_from_tariff(tariff):
+    e_prices = tariff['e_prices'][0]        # first tier price by TOU period
+    wk = tariff['e_wkday_12by24']           # 12x24 (0-based periods)
+    periods = []
+    for m in range(12):
+        for _ in range(30):                 # quick 30-day months
+            periods += wk[m]
+    periods = periods[:8760]
+    return [e_prices[p] for p in periods]
 #%%
 def calc_system_performance(kw, pv, utilityrate, loan, batt, costs, agent, rate_switch_table, en_batt=True, batt_dispatch='price_signal_forecast'):
     """
@@ -92,8 +101,17 @@ def calc_system_performance(kw, pv, utilityrate, loan, batt, costs, agent, rate_
             batt.BatteryDispatch.batt_dispatch_choice = 4
         batt.BatteryDispatch.batt_dispatch_auto_can_charge = 1
         batt.BatteryDispatch.batt_dispatch_auto_can_clipcharge = 1
-        batt.BatteryDispatch.batt_dispatch_auto_can_gridcharge = 1
-        cycle_cost_list = [0.1]
+        batt.BatteryDispatch.batt_dispatch_auto_can_gridcharge = 0
+        batt.BatteryDispatch.batt_dispatch_charge_only_system_exceeds_load = 1
+        batt.BatteryDispatch.batt_dispatch_discharge_only_load_exceeds_system = 0
+        batt.BatteryDispatch.batt_dispatch_auto_btm_can_discharge_to_grid = 1
+        batt.BatteryDispatch.batt_dispatch_load_forecast_choice = 0
+        batt.BatteryDispatch.batt_dispatch_wf_forecast_choice = 0
+        batt.BatteryDispatch.batt_look_ahead_hours = 24
+        batt.BatteryDispatch.batt_dispatch_update_frequency_hours = 1
+        batt.BatteryDispatch.batt_pv_ac_forecast = gen
+        batt.BatteryDispatch.batt_load_ac_forecast = load_hourly
+        cycle_cost_list = [0.]
         batt.BatteryDispatch.batt_cycle_cost = cycle_cost_list
         batt.BatteryDispatch.batt_cycle_cost_choice = 0
 
@@ -111,7 +129,8 @@ def calc_system_performance(kw, pv, utilityrate, loan, batt, costs, agent, rate_
         else:
             net_billing_sell_rate = agent.loc['wholesale_elec_price_dollars_per_kwh'] * agent.loc['elec_price_multiplier']
         
-        utilityrate = process_tariff(utilityrate, agent.loc['tariff_dict'], net_billing_sell_rate)
+        ts_sell = (np.array(hourly_prices['prices']) / 1000).tolist()
+        utilityrate = process_tariff(utilityrate, agent.loc['tariff_dict'], net_billing_sell_rate, ts_sell_rate = ts_sell)
         utilityrate.SystemOutput.gen = batt.SystemOutput.gen 
         loan.BatterySystem.en_batt = 1
         loan.BatterySystem.batt_computed_bank_capacity = batt.Outputs.batt_bank_installed_capacity
@@ -154,8 +173,7 @@ def calc_system_performance(kw, pv, utilityrate, loan, batt, costs, agent, rate_
         #loan.SystemCosts.om_production1_values = [batt.Outputs.batt_bank_installed_capacity] # Use actual production from battery run for variable O&M
         loan.SystemCosts.om_production1_values = batt.Outputs.batt_annual_discharge_energy
  
-        batt_costs = ((costs['batt_capex_per_kw_combined']* batt.BatterySystem.batt_power_charge_max_kwdc) + 
-                      (costs['batt_capex_per_kwh_combined'] * batt.Outputs.batt_bank_installed_capacity))
+        batt_costs = ((costs['batt_capex_per_kwh_combined'] * batt.Outputs.batt_bank_installed_capacity))
         value_of_resiliency = agent.loc['value_of_resiliency_usd']
         
     else:
@@ -180,7 +198,8 @@ def calc_system_performance(kw, pv, utilityrate, loan, batt, costs, agent, rate_
         else:
             net_billing_sell_rate = agent.loc['wholesale_elec_price_dollars_per_kwh'] * agent.loc['elec_price_multiplier']
         
-        utilityrate = process_tariff(utilityrate, agent.loc['tariff_dict'], net_billing_sell_rate)
+        ts_sell = (np.array(hourly_prices['prices']) / 1000).tolist()
+        utilityrate = process_tariff(utilityrate, agent.loc['tariff_dict'], net_billing_sell_rate, ts_sell_rate = ts_sell)
         utilityrate.SystemOutput.gen = gen
         
         # specify number of O&M types (0 = PV only)
@@ -222,12 +241,12 @@ def calc_system_performance(kw, pv, utilityrate, loan, batt, costs, agent, rate_
     direct_costs = (system_costs + batt_costs) * costs['cap_cost_multiplier']
 
     sales_tax = 0.
-    loan.SystemCosts.total_installed_cost = direct_costs + linear_constant + sales_tax + one_time_charge
+    loan.SystemCosts.total_installed_cost = direct_costs + sales_tax + one_time_charge
     
     # Execute financial module 
     loan.execute()
 
-    return loan.Outputs.payback
+    return -loan.Outputs.npv
 
 
 def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None):
@@ -307,15 +326,19 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
     utilityrate.SystemOutput.degradation            = [agent.loc['pv_degradation_factor'] * 100]
     utilityrate.ElectricityRates.rate_escalation    = [agent.loc['elec_price_escalator'] * 100]
 
-    utilityrate.ElectricityRates.ur_metering_option      = nem_opts[style]
+    utilityrate.ElectricityRates.ur_metering_option      = 2
     utilityrate.ElectricityRates.ur_nm_yearend_sell_rate = net_sell
-    utilityrate.ElectricityRates.ur_en_ts_sell_rate      = 0
-    utilityrate.ElectricityRates.ur_ts_sell_rate         = [0.]
     utilityrate.ElectricityRates.ur_sell_eq_buy          = 0
     utilityrate.ElectricityRates.TOU_demand_single_peak  = 0
     utilityrate.ElectricityRates.en_electricity_rates    = 1
 
-    utilityrate = process_tariff(utilityrate, tariff_dict, net_sell)
+    ts_sell = (np.array(hourly_prices['prices']) / 1000).tolist()
+    utilityrate = process_tariff(utilityrate, agent.loc['tariff_dict'], net_sell, ts_sell_rate = ts_sell)
+
+    ts = list(utilityrate.ElectricityRates.ur_ts_sell_rate)
+    print(f"TS sell enabled for {agent.loc['agent_id']}:", int(utilityrate.ElectricityRates.ur_en_ts_sell_rate))
+    print(f"TS sell len for {agent.loc['agent_id']}:", len(ts), "min/max/mean/std:", float(np.min(ts)), float(np.max(ts)), float(np.mean(ts)), float(np.std(ts)))
+    print(f"TS sell first 24 for {agent.loc['agent_id']}:", [round(v,4) for v in ts[:24]])
 
     loan.FinancialParameters.analysis_period               = agent.loc['economic_lifetime_yrs']
     loan.FinancialParameters.debt_fraction                 = 100 - (agent.loc['down_payment_fraction'] * 100)
@@ -383,21 +406,13 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
 
     # freeze your three modules + static inputs into two 1-D functions:
     def perf_with_batt(x):
-        try:
-            p = calc_system_performance(
+        return calc_system_performance(
                 x, pv, utilityrate, loan, batt, sc, agent, rate_switch_table, True, batt_disp
             )
-            return p if p is not None else 30.1
-        except:
-            30.1
     def perf_no_batt(x):
-        try: 
-            p = calc_system_performance(
+        return calc_system_performance(
                 x, pv, utilityrate, loan, batt, sc, agent, rate_switch_table, False, 0
             )
-            return p if p is not None else 30.1
-        except:
-            30.1
 
     # run the two scalar minimizations:
     res_w = optimize.minimize_scalar(perf_with_batt,
@@ -412,6 +427,7 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
     disp_w     = (batt.Outputs.batt_power.tolist()
                   if hasattr(batt.Outputs.batt_power, 'tolist') else [])
     npv_w      = out_w_loan['npv']
+    payback_w  = out_w_loan['payback']
 
     res_n = optimize.minimize_scalar(perf_no_batt,
                                      bounds=(low, high),
@@ -421,7 +437,25 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
     out_n_util = utilityrate.Outputs.export()
     gen_n      = np.sum(utilityrate.SystemOutput.gen)
     npv_n      = out_n_loan['npv']
+    payback_n  = out_n_loan['payback']
     optimize_time = time.time() - t_opt
+
+    print(f"NPV with battery for {agent.loc['agent_id']}:", npv_w)
+    print(f"NPV without battery for {agent.loc['agent_id']}:", npv_n)
+    print(f"Payback with battery for {agent.loc['agent_id']}:", payback_w)
+    print(f"Payback without battery for {agent.loc['agent_id']}:", payback_n)
+    #print(f"Annual energy charged from grid for {agent.loc['agent_id']}:", batt.Outputs.batt_to_grid)
+    print(f"choice (want 4) for {agent.loc['agent_id']}:", int(batt.BatteryDispatch.batt_dispatch_choice))
+    print(f"btm discharge to grid (want 1) for {agent.loc['agent_id']}:", int(batt.BatteryDispatch.batt_dispatch_auto_btm_can_discharge_to_grid))
+    print(f"discharge only when load>PV (want 0) for {agent.loc['agent_id']}:", int(batt.BatteryDispatch.batt_dispatch_discharge_only_load_exceeds_system))
+    print(f"gridcharge allowed (want 0) for {agent.loc['agent_id']}:", int(batt.BatteryDispatch.batt_dispatch_auto_can_gridcharge))
+    print(f"charge only PV>load (want 1) for {agent.loc['agent_id']}:", int(batt.BatteryDispatch.batt_dispatch_charge_only_system_exceeds_load))
+    print(f"metering option for {agent.loc['agent_id']}:", int(utilityrate.ElectricityRates.ur_metering_option))
+    buy_ts  = approx_buy_ts_from_tariff(agent.loc['tariff_dict'])
+    sell_ts = list(utilityrate.ElectricityRates.ur_ts_sell_rate)
+    n = min(len(buy_ts), len(sell_ts))
+    hrs_profitable = sum(1 for i in range(n) if sell_ts[i] > buy_ts[i])
+    print(f"Hours with sell > buy for {agent.loc['agent_id']}:", hrs_profitable)
 
     if npv_w >= npv_n:
         system_kw     = res_w.x
@@ -501,7 +535,7 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
 
 
 #%%
-def process_tariff(utilityrate, tariff_dict, net_billing_sell_rate):
+def process_tariff(utilityrate, tariff_dict, net_billing_sell_rate, ts_sell_rate=None, ts_buy_rate=None):
     """
     Instantiate the utilityrate5 PySAM model and process the agent's rate json object to conform with PySAM input formatting.
     
@@ -624,7 +658,20 @@ def process_tariff(utilityrate, tariff_dict, net_billing_sell_rate):
         utilityrate.ElectricityRates.ur_ec_sched_weekday = e_wkday_12by24
         # Energy charge weekend schedule
         utilityrate.ElectricityRates.ur_ec_sched_weekend = e_wkend_12by24
-        
+
+    ### Allowing for time-step billing
+    if ts_sell_rate is not None and len(ts_sell_rate) == 8760:
+        utilityrate.ElectricityRates.ur_en_ts_sell_rate = 1
+        utilityrate.ElectricityRates.ur_ts_sell_rate = ts_sell_rate
+    else:
+        utilityrate.ElectricityRates.ur_en_ts_sell_rate = 0
+        utilityrate.ElectricityRates.ur_ts_sell_rate = [0.]
+
+    if ts_buy_rate is not None and len(ts_buy_rate) == 8760:
+        utilityrate.ElectricityRates.ur_en_ts_buy_rate = 1
+        utilityrate.ElectricityRates.ur_ts_buy_rate = ts_buy_rate
+    else:
+        utilityrate.ElectricityRates.ur_en_ts_buy_rate = 0
     
     return utilityrate
 
