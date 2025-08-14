@@ -42,3 +42,4 @@ timeslice_8760_wH17.csv
 
 # The data file where I've put the sql data
 data/
+dgen_os/input_agents/*.pkl
