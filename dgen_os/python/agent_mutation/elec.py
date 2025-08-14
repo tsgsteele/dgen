@@ -120,7 +120,6 @@ def apply_export_tariff_params(dataframe, net_metering_state_df, net_metering_ut
     
     dataframe = dataframe.set_index('agent_id')
     # dataframe = dataframe.drop_duplicates(subset=dataframe.columns.difference(['tariff_dict']))
-    dataframe.to_csv("kentuck_test.csv", index=False)
     return dataframe
 
 
