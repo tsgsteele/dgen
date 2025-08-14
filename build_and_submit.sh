@@ -7,4 +7,4 @@ docker buildx build --platform linux/amd64 \
   --push .
 
 # Submit job
-./submit_one.sh
+./submit_all.sh
