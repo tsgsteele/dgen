@@ -1,5 +1,6 @@
 # batt_dispatch_helpers.py
 import numpy as np
+import os
 
 # ---------- Safe value helpers ----------
 
@@ -289,21 +290,22 @@ def dispatch_export_diags(
     batt_capex_core   = batt_kwh_est * u_kwh
     batt_capex_gross  = batt_capex_core * cap_mult
 
-    # ---- Prints (concise) ----
-    print(f"=== Dispatch/export diagnostics for {agent_id} ===")
-    print(f"Approx sizes: PV≈{_fmt(pv_kw_est)} kW | Battery≈{_fmt(batt_kwh_est)} kWh")
-    print(f"sell source={src}, len={sell.size}, min/mean/max={sell_min:.4f}/{sell_mean:.4f}/{sell_max:.4f}, "
-          f"mean_day={sell_day:.4f}, mean_night={sell_night:.4f}")
-    print(f"PV surplus kWh: total={surplus_total:.3f} | midday={surplus_mid_kwh:.3f}")
-    print(f"PV→Batt kWh: total={s2b_total:.3f} | midday={s2b_mid:.3f} | capture_mid={cap_mid:.3f}")
-    print(f"PV→Grid kWh: total={s2g_total:.3f} | midday={s2g_mid:.3f}")
-    print(f"Batt use kWh: to_load={b2l_total:.3f} | to_grid={b2g_total:.3f} | to_grid_at_night={b2g_night:.3f}")
-    print(f"Revenue $: batt_all={batt_rev_all:.2f} | batt_night={batt_rev_night:.2f} | pv_all={pv_rev_all:.2f} | pv_midday={pv_rev_mid:.2f}")
-    print(f"Avoided spend $ (buy={buy_src}): pv_self={avoided_pv_self:.2f} | batt_self={avoided_batt_self:.2f} | buy_mean={float(np.mean(buy)):.4f}")
-    print(f"Battery system total installed cost $: ${round(batt_capex_gross,2)}")
-    print(f"Limits: charge_cap_kW={float(chg_max_kw):.3f} | discharge_cap_kW={float(dis_max_kw):.3f} | "
-          f"midday_power_bound_hrs={power_bound_mid} | midday_SOC_bound_hrs={soc_bound_mid}")
-    print(f"Bottlenecks (all hours with PV surplus): power_bound_hrs={power_bound_all} | SOC_bound_hrs={soc_bound_all}")
+    if not os.environ.get('PG_CONN_STRING'):
+        # ---- Prints (concise) ----
+        print(f"=== Dispatch/export diagnostics for {agent_id} ===")
+        print(f"Approx sizes: PV≈{_fmt(pv_kw_est)} kW | Battery≈{_fmt(batt_kwh_est)} kWh")
+        print(f"sell source={src}, len={sell.size}, min/mean/max={sell_min:.4f}/{sell_mean:.4f}/{sell_max:.4f}, "
+            f"mean_day={sell_day:.4f}, mean_night={sell_night:.4f}")
+        print(f"PV surplus kWh: total={surplus_total:.3f} | midday={surplus_mid_kwh:.3f}")
+        print(f"PV→Batt kWh: total={s2b_total:.3f} | midday={s2b_mid:.3f} | capture_mid={cap_mid:.3f}")
+        print(f"PV→Grid kWh: total={s2g_total:.3f} | midday={s2g_mid:.3f}")
+        print(f"Batt use kWh: to_load={b2l_total:.3f} | to_grid={b2g_total:.3f} | to_grid_at_night={b2g_night:.3f}")
+        print(f"Revenue $: batt_all={batt_rev_all:.2f} | batt_night={batt_rev_night:.2f} | pv_all={pv_rev_all:.2f} | pv_midday={pv_rev_mid:.2f}")
+        print(f"Avoided spend $ (buy={buy_src}): pv_self={avoided_pv_self:.2f} | batt_self={avoided_batt_self:.2f} | buy_mean={float(np.mean(buy)):.4f}")
+        print(f"Battery system total installed cost $: ${round(batt_capex_gross,2)}")
+        print(f"Limits: charge_cap_kW={float(chg_max_kw):.3f} | discharge_cap_kW={float(dis_max_kw):.3f} | "
+            f"midday_power_bound_hrs={power_bound_mid} | midday_SOC_bound_hrs={soc_bound_mid}")
+        print(f"Bottlenecks (all hours with PV surplus): power_bound_hrs={power_bound_all} | SOC_bound_hrs={soc_bound_all}")
 
 
     # ---- Return summary ----

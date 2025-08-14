@@ -1,11 +1,10 @@
-import os
-import ast
 import datetime as dt
 import numpy as np
 import pandas as pd
 import decorators
 import datetime
 from scipy import optimize
+import re, json, ast, os
 
 import settings
 import utility_functions as utilfunc
@@ -27,8 +26,6 @@ import PySAM.CustomGeneration as customgen
 import PySAM.Pvsamv1 as pvsamv1
 import PySAM.Pvwattsv8 as pvwattsv8
 
-# Load hourly prices for test
-hourly_prices = pd.read_csv("../../data/hourly_prices_kwh.csv")
 #==============================================================================
 # Load logger
 logger = utilfunc.get_logger()
@@ -411,7 +408,8 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
 
     # Set the time series of sell prices
     ts_sell = np.asarray(agent.loc['wholesale_prices'], dtype=float).ravel() * agent.loc['elec_price_multiplier']
-    utilityrate = process_tariff(utilityrate, ast.literal_eval(agent.loc['tariff_dict']), net_sell, ts_sell_rate=ts_sell)
+    tariff_dict = normalize_tariff(agent.loc['tariff_dict'], net_sell_rate_scalar=net_sell)
+    utilityrate = process_tariff(utilityrate, tariff_dict, net_sell, ts_sell_rate=ts_sell)
 
     loan.FinancialParameters.analysis_period = agent.loc['economic_lifetime_yrs']
     loan.FinancialParameters.debt_fraction = 100 - (agent.loc['down_payment_fraction'] * 100)
@@ -1326,6 +1324,140 @@ def size_chunk(static_agents_df, sectors, rate_switch_table):
     )
 
     return pd.DataFrame(results)
+
+def _parse_tariff_dict(raw):
+    """Accept dict or string; coerce to dict, tolerating 'nan'/None."""
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str):
+        return {}
+    s = re.sub(r'\bnan\b', 'null', raw, flags=re.IGNORECASE)
+    s = re.sub(r'\bNone\b', 'null', s)
+    try:
+        return json.loads(s)     # prefer strict JSON
+    except json.JSONDecodeError:
+        return ast.literal_eval(raw)  # fallback to Python literal
+
+def _num(x, default=0.0):
+    try:
+        if x is None or (isinstance(x, str) and x.strip().lower() in ("", "nan", "none", "null")):
+            return default
+        return float(x)
+    except Exception:
+        return default
+
+def _sched_12x24_single_period():
+    """12 months × 24 hours, all period=1 (PySAM uses 1-based)."""
+    return [[1]*24 for _ in range(12)]
+
+def _plus1_sched(mat):
+    """Convert 0/1/2 → 1/2/3; default to all-1s if missing."""
+    if not mat:
+        return _sched_12x24_single_period()
+    out = []
+    for row in mat:
+        out.append([int(x)+1 if isinstance(x, (int, float)) else 1 for x in row])
+    return out
+
+def _build_ur_ec_from_e_parts(td, net_sell_rate_scalar=0.0):
+    """
+    Build ur_ec_tou_mat from legacy energy fields.
+    Row format: [period(1..P), tier(1..T), max_usage, usage_units_code, price, net_sell_rate]
+    """
+    prices = td.get('e_prices') or []
+    if not prices:
+        return []
+    levels = td.get('e_levels') or []
+    n_tiers = len(prices)
+    n_periods = len(prices[0]) if n_tiers else 0
+    BIG = 1e38
+    if not levels or len(levels) != n_tiers or len(levels[0]) != n_periods:
+        levels = [[BIG]*n_periods for _ in range(n_tiers)]
+    unit_map = {'kWh':0, 'kWh/kW':1, 'kWh daily':2, 'kWh/kW daily':3}
+    ucode = unit_map.get(td.get('energy_rate_unit', 'kWh'), 0)
+
+    rows = []
+    for p in range(n_periods):
+        for t in range(n_tiers):
+            rows.append([p+1, t+1, float(levels[t][p]), int(ucode), float(prices[t][p]), float(net_sell_rate_scalar)])
+    return rows
+
+def _build_ur_dc_from_d_parts(td):
+    """
+    Build demand-charge mats from legacy fields.
+    Row format: [period(1..P), tier(1..T), max_kW, price]
+    """
+    out = {'ur_dc_flat_mat': [], 'ur_dc_tou_mat': []}
+
+    # flat DC
+    dfl, dfr = td.get('d_flat_levels') or [], td.get('d_flat_prices') or []
+    if dfl and dfr:
+        n_tiers = len(dfl)
+        n_periods = len(dfl[0]) if n_tiers else 0
+        flat = []
+        for p in range(n_periods):
+            for t in range(n_tiers):
+                flat.append([p+1, t+1, float(dfl[t][p]), float(dfr[t][p])])
+        out['ur_dc_flat_mat'] = flat
+
+    # TOU DC
+    dtl, dtr = td.get('d_tou_levels') or [], td.get('d_tou_prices') or []
+    if dtl and dtr:
+        n_tiers = len(dtl)
+        n_periods = len(dtl[0]) if n_tiers else 0
+        tou = []
+        for p in range(n_periods):
+            for t in range(n_tiers):
+                tou.append([p+1, t+1, float(dtl[t][p]), float(dtr[t][p])])
+        out['ur_dc_tou_mat'] = tou
+
+    # schedules: prefer UR fields else legacy d_* 12×24
+    out['ur_dc_sched_weekday'] = _plus1_sched(td.get('ur_dc_sched_weekday') or td.get('d_wkday_12by24'))
+    out['ur_dc_sched_weekend'] = _plus1_sched(td.get('ur_dc_sched_weekend') or td.get('d_wkend_12by24'))
+
+    # enable if any DC structure exists or legacy flags indicate it
+    dc_enable = 1 if (out['ur_dc_flat_mat'] or out['ur_dc_tou_mat'] or bool(td.get('d_flat_exists')) or bool(td.get('d_tou_exists'))) else 0
+    return out, dc_enable
+
+def normalize_tariff(raw, net_sell_rate_scalar=0.0, debug=False):
+    """
+    Parse → coerce legacy→UR5 → fill defaults.
+    Returns a dict that process_tariff can consume without KeyErrors.
+    """
+    td = _parse_tariff_dict(raw)
+
+    out = {}
+    out['en_electricity_rates'] = int(td.get('en_electricity_rates', 1))
+    out['ur_metering_option']   = int(td.get('ur_metering_option', 0))
+
+    # Fixed charge (0.0 when absent/nullish); also accept legacy 'fixed_charge'
+    fc = td.get('ur_monthly_fixed_charge', td.get('fixed_charge', 0.0))
+    out['ur_monthly_fixed_charge'] = _num(fc, 0.0)
+
+    # Energy structure
+    out['ur_ec_tou_mat'] = td.get('ur_ec_tou_mat') or _build_ur_ec_from_e_parts(td, net_sell_rate_scalar)
+
+    # Energy schedules (1-based 12×24)
+    out['ur_ec_sched_weekday'] = td.get('ur_ec_sched_weekday') or _plus1_sched(td.get('e_wkday_12by24')) or _sched_12x24_single_period()
+    out['ur_ec_sched_weekend'] = td.get('ur_ec_sched_weekend') or _plus1_sched(td.get('e_wkend_12by24')) or _sched_12x24_single_period()
+
+    # Demand structures & schedules
+    dc_mats, dc_enable_guess = _build_ur_dc_from_d_parts(td)
+    out['ur_dc_flat_mat'] = td.get('ur_dc_flat_mat') or dc_mats['ur_dc_flat_mat'] or []
+    out['ur_dc_tou_mat']  = td.get('ur_dc_tou_mat')  or dc_mats['ur_dc_tou_mat']  or []
+    out['ur_dc_sched_weekday'] = td.get('ur_dc_sched_weekday') or dc_mats['ur_dc_sched_weekday'] or _sched_12x24_single_period()
+    out['ur_dc_sched_weekend'] = td.get('ur_dc_sched_weekend') or dc_mats['ur_dc_sched_weekend'] or _sched_12x24_single_period()
+    out['ur_dc_enable'] = int(td.get('ur_dc_enable', dc_enable_guess))
+    out['ur_enable_billing_demand'] = bool(td.get('ur_enable_billing_demand', False))
+
+    if debug or os.environ.get("DGEN_DEBUG"):
+        need = ("ur_monthly_fixed_charge","ur_ec_tou_mat","ur_ec_sched_weekday","ur_ec_sched_weekend",
+                "ur_dc_enable","ur_dc_sched_weekday","ur_dc_sched_weekend")
+        miss = [k for k in need if k not in out or out[k] in (None, [], "", "nan")]
+        if miss:
+            print(f"[DEBUG] normalize_tariff filled/left defaults: {miss}")
+
+    return out
 
 
 #%%
