@@ -408,7 +408,7 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
 
     # Set the time series of sell prices
     ts_sell = np.asarray(agent.loc['wholesale_prices'], dtype=float).ravel() * agent.loc['elec_price_multiplier']
-    tariff_dict = normalize_tariff(agent.loc['tariff_dict'], net_sell_rate_scalar=net_sell)
+    tariff_dict = agent.loc['tariff_dict']
     utilityrate = process_tariff(utilityrate, tariff_dict, net_sell, ts_sell_rate=ts_sell)
 
     loan.FinancialParameters.analysis_period = agent.loc['economic_lifetime_yrs']
@@ -624,7 +624,7 @@ def calc_system_size_and_performance(con, agent, sectors, rate_switch_table=None
 
 
 #%%
-def process_tariff(utilityrate, tariff_dict, net_billing_sell_rate, ts_sell_rate = None, ts_buy_rate = None):
+def process_tariff(utilityrate, tariff_dict, net_billing_sell_rate, ts_sell_rate=None, ts_buy_rate=None):
     """
     Instantiate the utilityrate5 PySAM model and process the agent's rate json object to conform with PySAM input formatting.
     
@@ -643,8 +643,7 @@ def process_tariff(utilityrate, tariff_dict, net_billing_sell_rate, ts_sell_rate
     ######################################
     
     # Monthly fixed charge [$]
-
-    utilityrate.ElectricityRates.ur_monthly_fixed_charge = tariff_dict['ur_monthly_fixed_charge']
+    utilityrate.ElectricityRates.ur_monthly_fixed_charge = tariff_dict['fixed_charge']
     # Annual minimum charge [$]
     utilityrate.ElectricityRates.ur_annual_min_charge = 0. # not currently tracked in URDB rate attribute downloads
     # Monthly minimum charge [$]
@@ -657,55 +656,55 @@ def process_tariff(utilityrate, tariff_dict, net_billing_sell_rate, ts_sell_rate
     ######################################
     
     # Enable demand charge
-    utilityrate.ElectricityRates.ur_dc_enable = tariff_dict['ur_dc_enable']
+    utilityrate.ElectricityRates.ur_dc_enable = (tariff_dict['d_flat_exists']) | (tariff_dict['d_tou_exists'])
     
     if utilityrate.ElectricityRates.ur_dc_enable:
     
-        if tariff_dict['ur_dc_flat_mat']:
+        if tariff_dict['d_flat_exists']:
             
             # Reformat demand charge table from dGen format
-            #n_periods = len(tariff_dict['d_flat_levels'][0])
-            #n_tiers = len(tariff_dict['d_flat_levels'])
-            #ur_dc_flat_mat = []
-            #for period in range(n_periods):
-            #    for tier in range(n_tiers):
-            #        row = [period, tier+1, tariff_dict['d_flat_levels'][tier][period], tariff_dict['d_flat_prices'][tier][period]]
-            #        ur_dc_flat_mat.append(row)
+            n_periods = len(tariff_dict['d_flat_levels'][0])
+            n_tiers = len(tariff_dict['d_flat_levels'])
+            ur_dc_flat_mat = []
+            for period in range(n_periods):
+                for tier in range(n_tiers):
+                    row = [period, tier+1, tariff_dict['d_flat_levels'][tier][period], tariff_dict['d_flat_prices'][tier][period]]
+                    ur_dc_flat_mat.append(row)
             
             # Demand rates (flat) table
-            utilityrate.ElectricityRates.ur_dc_flat_mat = tariff_dict['ur_dc_flat_mat']
+            utilityrate.ElectricityRates.ur_dc_flat_mat = ur_dc_flat_mat
         
         
-        if tariff_dict['ur_dc_tou_mat']:
+        if tariff_dict['d_tou_exists']:
             
             # Reformat demand charge table from dGen format
-            #n_periods = len(tariff_dict['d_tou_levels'][0])
-            #n_tiers = len(tariff_dict['d_tou_levels'])
-            #ur_dc_tou_mat = []
-            #for period in range(n_periods):
-            #    for tier in range(n_tiers):
-            #        row = [period+1, tier+1, tariff_dict['d_tou_levels'][tier][period], tariff_dict['d_tou_prices'][tier][period]]
-            #        ur_dc_tou_mat.append(row)
+            n_periods = len(tariff_dict['d_tou_levels'][0])
+            n_tiers = len(tariff_dict['d_tou_levels'])
+            ur_dc_tou_mat = []
+            for period in range(n_periods):
+                for tier in range(n_tiers):
+                    row = [period+1, tier+1, tariff_dict['d_tou_levels'][tier][period], tariff_dict['d_tou_prices'][tier][period]]
+                    ur_dc_tou_mat.append(row)
             
             # Demand rates (TOU) table
-            utilityrate.ElectricityRates.ur_dc_tou_mat = tariff_dict['ur_dc_tou_mat']
+            utilityrate.ElectricityRates.ur_dc_tou_mat = ur_dc_tou_mat
     
     
         # Reformat 12x24 tables - original are indexed to 0, PySAM needs index starting at 1
-        #d_wkday_12by24 = []
-        #for m in range(len(tariff_dict['d_wkday_12by24'])):
-        #    row = [x+1 for x in tariff_dict['d_wkday_12by24'][m]]
-        #    d_wkday_12by24.append(row)
+        d_wkday_12by24 = []
+        for m in range(len(tariff_dict['d_wkday_12by24'])):
+            row = [x+1 for x in tariff_dict['d_wkday_12by24'][m]]
+            d_wkday_12by24.append(row)
             
-        #d_wkend_12by24 = []
-        #for m in range(len(tariff_dict['d_wkend_12by24'])):
-        #    row = [x+1 for x in tariff_dict['d_wkend_12by24'][m]]
-        #    d_wkend_12by24.append(row)
+        d_wkend_12by24 = []
+        for m in range(len(tariff_dict['d_wkend_12by24'])):
+            row = [x+1 for x in tariff_dict['d_wkend_12by24'][m]]
+            d_wkend_12by24.append(row)
 
         # Demand charge weekday schedule
-        utilityrate.ElectricityRates.ur_dc_sched_weekday = tariff_dict['ur_dc_sched_weekday'] #d_wkday_12by24
+        utilityrate.ElectricityRates.ur_dc_sched_weekday = d_wkday_12by24
         # Demand charge weekend schedule
-        utilityrate.ElectricityRates.ur_dc_sched_weekend = tariff_dict['ur_dc_sched_weekend'] #d_wkend_12by24
+        utilityrate.ElectricityRates.ur_dc_sched_weekend = d_wkend_12by24
     
     
     ######################################
@@ -713,41 +712,41 @@ def process_tariff(utilityrate, tariff_dict, net_billing_sell_rate, ts_sell_rate
     ###-------- ENERGY CHARGES --------###
     ######################################
     
-    if tariff_dict['ur_ec_tou_mat']:
+    if tariff_dict['e_exists']:
         
         # Dictionary to map dGen max usage units to PySAM options
         max_usage_dict = {'kWh':0, 'kWh/kW':1, 'kWh daily':2, 'kWh/kW daily':3}
         # If max usage units are 'kWh daily', divide max usage by 30 -- rate download procedure converts daily to monthly
-        # modifier = 30. if tariff_dict['energy_rate_unit'] == 'kWh daily' else 1.
+        modifier = 30. if tariff_dict['energy_rate_unit'] == 'kWh daily' else 1.
         
-        # # Reformat energy charge table from dGen format
-        # n_periods = len(tariff_dict['e_levels'][0])
-        # n_tiers = len(tariff_dict['e_levels'])
-        # ur_ec_tou_mat = []
-        # for period in range(n_periods):
-        #     for tier in range(n_tiers):
-        #         row = [period+1, tier+1, tariff_dict['e_levels'][tier][period], max_usage_dict[tariff_dict['energy_rate_unit']],
-        #          tariff_dict['e_prices'][tier][period], net_billing_sell_rate]
-        #         ur_ec_tou_mat.append(row)
+        # Reformat energy charge table from dGen format
+        n_periods = len(tariff_dict['e_levels'][0])
+        n_tiers = len(tariff_dict['e_levels'])
+        ur_ec_tou_mat = []
+        for period in range(n_periods):
+            for tier in range(n_tiers):
+                row = [period+1, tier+1, tariff_dict['e_levels'][tier][period], max_usage_dict[tariff_dict['energy_rate_unit']],
+                 tariff_dict['e_prices'][tier][period], net_billing_sell_rate]
+                ur_ec_tou_mat.append(row)
         
         # Energy rates table
-        utilityrate.ElectricityRates.ur_ec_tou_mat = tariff_dict['ur_ec_tou_mat']
+        utilityrate.ElectricityRates.ur_ec_tou_mat = ur_ec_tou_mat
         
         # Reformat 12x24 tables - original are indexed to 0, PySAM needs index starting at 1
-        # e_wkday_12by24 = []
-        # for m in range(len(tariff_dict['e_wkday_12by24'])):
-        #     row = [x+1 for x in tariff_dict['e_wkday_12by24'][m]]
-        #     e_wkday_12by24.append(row)
+        e_wkday_12by24 = []
+        for m in range(len(tariff_dict['e_wkday_12by24'])):
+            row = [x+1 for x in tariff_dict['e_wkday_12by24'][m]]
+            e_wkday_12by24.append(row)
             
-        # e_wkend_12by24 = []
-        # for m in range(len(tariff_dict['e_wkend_12by24'])):
-        #     row = [x+1 for x in tariff_dict['e_wkend_12by24'][m]]
-        #     e_wkend_12by24.append(row)
+        e_wkend_12by24 = []
+        for m in range(len(tariff_dict['e_wkend_12by24'])):
+            row = [x+1 for x in tariff_dict['e_wkend_12by24'][m]]
+            e_wkend_12by24.append(row)
         
         # Energy charge weekday schedule
-        utilityrate.ElectricityRates.ur_ec_sched_weekday = tariff_dict['ur_ec_sched_weekday'] #e_wkday_12by24
+        utilityrate.ElectricityRates.ur_ec_sched_weekday = e_wkday_12by24
         # Energy charge weekend schedule
-        utilityrate.ElectricityRates.ur_ec_sched_weekend = tariff_dict['ur_ec_sched_weekend'] #e_wkend_12by24
+        utilityrate.ElectricityRates.ur_ec_sched_weekend = e_wkend_12by24
 
     ### Allowing for time-step billing
     if ts_sell_rate is not None and len(ts_sell_rate) == 8760:
