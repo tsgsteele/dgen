@@ -35,7 +35,7 @@ import PySAM.Pvwattsv8 as pvwattsv8
 SKIP_DEMAND_CHARGES = True
 
 # Force net billing
-FORCE_NET_BILLING = True
+FORCE_NET_BILLING = False
 
 #==============================================================================
 # Logger
@@ -129,7 +129,7 @@ def calc_system_performance(
         batt.BatterySystem.batt_replacement_option = 0
         batt.batt_minimum_SOC = 10
 
-        pv_to_batt_ratio = 0.8
+        pv_to_batt_ratio = 1.31372
         batt_capacity_to_power_ratio = 2.0
         desired_size  = kw / pv_to_batt_ratio
         desired_power = desired_size / batt_capacity_to_power_ratio
@@ -149,7 +149,7 @@ def calc_system_performance(
             allow_export=True,
             allow_grid_charge=False,
             charge_only_when_surplus=True,
-            lookahead_hours=36,
+            lookahead_hours=24,
         )
         if not hasattr(batt.BatteryDispatch, 'batt_look_ahead_hours'):
             batt.BatteryDispatch.batt_look_ahead_hours = 24
@@ -175,6 +175,7 @@ def calc_system_performance(
         ts_sell = np.asarray(agent.loc['wholesale_prices'], dtype=float).ravel() * agent.loc['elec_price_multiplier']
         td_norm = normalize_tariff(agent.loc['tariff_dict'], net_sell_rate_scalar=net_billing_sell_rate)
         process_tariff(utilityrate, td_norm, net_billing_sell_rate, ts_sell_rate=ts_sell)
+
 
         # Hand gen to the rate engine
         utilityrate.SystemOutput.gen = gen
@@ -395,8 +396,8 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     max_system = max_load
     tol        = min(0.25 * max_system, 0.25)
     batt_disp  = 'peak_shaving' if agent.loc['sector_abbr'] != 'res' else 'price_signal_forecast'
-    low  = max_system * 0.75
-    high = max_system * 1.25
+    low        = max_system*.75
+    high       = max_system*1.25
 
     def perf_with_batt(x):
         return calc_system_performance(
@@ -425,7 +426,6 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     # Pull the exact hourly series SAM actually used
     gen_opt  = np.asarray(utilityrate.SystemOutput.gen, dtype=float)
     load_opt = np.asarray(utilityrate.Load.load, dtype=float)
-    diag_summary = dispatch_export_diags(agent, batt, gen_opt, load_opt, sc, res_w, utilityrate)
 
     res_n = optimize.minimize_scalar(
         perf_no_batt,
@@ -476,18 +476,6 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     savings_frac = savings / first_without
     avg_price    = first_without / agent.loc['load_kwh_per_customer_in_bin']
 
-    diag_keys = [
-        "surplus_total_kwh","surplus_mid_kwh","pv_to_batt_total_kwh","pv_to_batt_mid_kwh",
-        "pv_to_grid_total_kwh","pv_to_grid_mid_kwh","pv_direct_to_load_total_kwh",
-        "batt_to_load_kwh","batt_to_grid_total_kwh","batt_to_grid_night_kwh",
-        "capture_mid_frac","sell_mean_day","sell_mean_night",
-        "batt_rev_all_usd","batt_rev_night_usd","pv_rev_all_usd","pv_rev_midday_usd",
-        "avoided_pv_self_usd","avoided_batt_self_usd","avg_buy_rate_used",
-        "pv_kw_est","batt_kwh_est","batt_total_installed_cost",
-    ]
-    for k in diag_keys:
-        agent.loc[k] = diag_summary.get(k, np.nan)
-
     agent.loc['system_kw']                           = system_kw
     agent.loc['batt_kw']                             = batt_kw
     agent.loc['batt_kwh']                            = batt_kwh
@@ -523,7 +511,7 @@ def process_tariff(utilityrate, tariff_dict, net_billing_sell_rate, ts_sell_rate
     Apply tariff safely for Utilityrate5.
 
     Policy:
-      • Force Net Billing (mo=1) when FORCE_NET_BILLING=True.
+      • Force Net Billing (mo=2) when FORCE_NET_BILLING=True.
       • Preserve TOU energy (buy) via ur_ec_tou_mat + schedules.
       • Allow 8760 SELL under Net Billing. (TS BUY optional; TOU buy is typical.)
       • Skip demand-charge arrays unless explicitly enabled & not globally skipped.
