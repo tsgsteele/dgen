@@ -169,8 +169,9 @@ def export_all(
     chunksize: int = 200_000,
     jobs: int = 1,
     overwrite: bool = True,
-    only_scenarios: Optional[Iterable[str]] = None,  # subset: {"baseline","policy"}
-    states_filter: Optional[Iterable[str]] = None,   # subset states like {"ca","ny"}
+    only_scenarios: Optional[Iterable[str]] = None,
+    states_filter: Optional[Iterable[str]] = None,
+    combine_per_state: bool = False,   # <— new: default off
 ) -> Dict[str, List[str]]:
     """
     Export all diffusion_result schemas in parallel, then combine per-state files.
@@ -209,7 +210,7 @@ def export_all(
         results = [export_one_schema(*t) for t in tasks]
     else:
         with Pool(processes=jobs) as pool:
-            for res in pool.imap_unordered(lambda t: export_one_schema(*t), tasks):
+            for res in pool.starmap(export_one_schema, tasks):
                 results.append(res)
 
     exported, skipped, failed = [], [], []
@@ -227,13 +228,14 @@ def export_all(
             if st:
                 states_out.add(st.upper())
 
-    # Combine per state (both scenarios) for this run_id
-    for st in sorted(states_out):
-        sdir = os.path.join(out_dir, st)
-        b_csv, p_csv = _find_state_files_for_run(sdir, run_id)
-        if b_csv or p_csv:
-            combined = os.path.join(sdir, f"both_scenarios_{run_id}.csv")
-            combine_two_csvs(b_csv, p_csv, combined, chunksize=chunksize)
+    # Optionally combine per state
+    if combine_per_state:
+        for st in sorted(states_out):
+            sdir = os.path.join(out_dir, st)
+            b_csv, p_csv = _find_state_files_for_run(sdir, run_id)
+            if b_csv or p_csv:
+                combined = os.path.join(sdir, f"both_scenarios_{run_id}.csv")
+                combine_two_csvs(b_csv, p_csv, combined, chunksize=chunksize)
 
     return {
         "exported": exported,
@@ -241,7 +243,6 @@ def export_all(
         "failed": failed,
         "states": sorted(states_out),
     }
-
 
 # -----------------------------
 # Command-line interface (CLI)
