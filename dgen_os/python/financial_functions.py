@@ -31,7 +31,7 @@ import PySAM.CustomGeneration as customgen
 import PySAM.Pvsamv1 as pvsamv1
 import PySAM.Pvwattsv8 as pvwattsv8
 
-# Toggle: avoid DC assignments entirely unless you explicitly need them.
+# Toggle: avoid DC assignments entirely unless explicitly needed.
 SKIP_DEMAND_CHARGES = True
 
 # Force net billing
@@ -148,7 +148,7 @@ def calc_system_performance(
             batt,
             allow_export=True,
             allow_grid_charge=False,
-            charge_only_when_surplus=True,
+            charge_only_when_surplus=False,
             lookahead_hours=24,
         )
         if not hasattr(batt.BatteryDispatch, 'batt_look_ahead_hours'):
@@ -206,7 +206,7 @@ def calc_system_performance(
             linear_constant = agent.loc['linear_constant']
 
         loan.SystemCosts.om_production1_values = batt.Outputs.batt_annual_discharge_energy
-        batt_costs = costs['batt_capex_per_kwh_combined'] * batt.Outputs.batt_bank_installed_capacity
+        batt_costs = costs['batt_capex_per_kwh_combined'] * batt.Outputs.batt_bank_installed_capacity * .7 # For the investment tax credit
         value_of_resiliency = agent.loc['value_of_resiliency_usd']
 
     else:
@@ -912,10 +912,6 @@ def size_chunk(static_agents_df: pd.DataFrame, sectors, rate_switch_table) -> pd
         results.append(sized)
 
     chunk_total_time = time.time() - chunk_start
-    logger.info(
-        "[size_chunk] Completed %d agents in %.2fs (load=%.2fs, res=%.2fs, setup=%.2fs, opt=%.2fs)",
-        n_agents, chunk_total_time, load_profile_time, solar_resource_time, pysam_setup_total, optimize_total
-    )
 
     return pd.DataFrame(results)
 

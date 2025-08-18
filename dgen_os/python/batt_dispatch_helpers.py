@@ -115,7 +115,7 @@ def dispatch_export_diags(
 ):
     """
     Minimal, robust diagnostics for:
-      • Midday PV surplus capture (PV→Batt vs PV→Grid),
+      • Midday PV surplus capture (PV→Batt vs PV→Grid), 
       • Battery night export (kWh & $),
       • Basic bottlenecks (charge power cap vs SOC full).
 
