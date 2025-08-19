@@ -20,7 +20,7 @@ taskGroups:
             dbname=dgendb
             user=postgres
             password=postgres
-          LOCAL_CORES: "16"
+          LOCAL_CORES: "8"
 
       runnables:
       - container:
@@ -69,6 +69,6 @@ taskGroups:
               python /opt/dgen_os/python/dgen_model.py
 
       computeResource:
-        cpuMilli: 16000            # 8 vCPUs
-        memoryMib: 32768           # 16 GiB
+        cpuMilli: 8000            # 8 vCPUs
+        memoryMib: 16384           # 16 GiB
         bootDiskMib: 100000         # 100 mb boot disk
