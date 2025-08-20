@@ -386,11 +386,26 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
         .reset_index(drop=True)
     )
 
-    # Baseline model average price in 2026 (if present)
-    if "avg_elec_price_cents_per_kwh" in x.columns and x["avg_elec_price_cents_per_kwh"].notna().any():
-        price_2026 = x[(x["year"] == 2026) & (x["scenario"] == "baseline")]
+        # Baseline model average price in 2026 (customer-weighted by customers_in_bin)
+    if (
+        "avg_elec_price_cents_per_kwh" in x.columns
+        and "customers_in_bin" in x.columns
+        and x["avg_elec_price_cents_per_kwh"].notna().any()
+    ):
+        price_2026 = x[(x["year"] == 2026) & (x["scenario"] == "baseline")].copy()
+        # Ensure weights are non-negative and handle NaNs as zero weight
+        price_2026["customers_in_bin"] = price_2026["customers_in_bin"].fillna(0.0).clip(lower=0.0)
+
+        def _weighted_avg(g: pd.DataFrame) -> float:
+            w = g["customers_in_bin"].to_numpy()
+            v = g["avg_elec_price_cents_per_kwh"].to_numpy()
+            ws = w.sum()
+            return float(np.average(v, weights=w)) if ws > 0 else np.nan
+
         avg_price_2026_model = (
-            price_2026.groupby("state_abbr", as_index=False)["avg_elec_price_cents_per_kwh"].mean()
+            price_2026.groupby("state_abbr", as_index=False)
+            .apply(_weighted_avg)
+            .rename(columns={None: "avg_elec_price_cents_per_kwh"})
         )
     else:
         avg_price_2026_model = pd.DataFrame(columns=["state_abbr", "avg_elec_price_cents_per_kwh"])
