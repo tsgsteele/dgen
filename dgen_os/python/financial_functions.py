@@ -191,14 +191,14 @@ def calc_system_performance(
 
         loan.SystemCosts.add_om_num_types = 1
         if kw > 0:
-            #loan.SystemCosts.om_capacity = [costs['system_om_per_kw_combined'] + costs['system_variable_om_per_kw_combined']]
+            loan.SystemCosts.om_capacity = [costs['system_om_per_kw_combined'] + costs['system_variable_om_per_kw_combined']]
             loan.SystemCosts.om_batt_capacity_cost = [0.0]
             loan.SystemCosts.om_batt_variable_cost = [0.0]
             loan.SystemCosts.om_batt_replacement_cost = [0.0]
             loan.SystemCosts.om_batt_nameplate = batt.Outputs.batt_bank_installed_capacity
             system_costs = costs['system_capex_per_kw_combined'] * kw
         else:
-            #loan.SystemCosts.om_capacity = [costs['system_om_per_kw'] + costs['system_variable_om_per_kw']]
+            loan.SystemCosts.om_capacity = [costs['system_om_per_kw'] + costs['system_variable_om_per_kw']]
             loan.SystemCosts.om_batt_capacity_cost = [0.0]
             loan.SystemCosts.om_batt_variable_cost = [0.0]
             loan.SystemCosts.om_batt_replacement_cost = [0.0]
@@ -236,7 +236,7 @@ def calc_system_performance(
 
         utilityrate.SystemOutput.gen = gen
         loan.SystemCosts.add_om_num_types = 0
-        #loan.SystemCosts.om_capacity = [costs['system_om_per_kw'] + costs['system_variable_om_per_kw']]
+        loan.SystemCosts.om_capacity = [costs['system_om_per_kw'] + costs['system_variable_om_per_kw']]
         loan.SystemCosts.om_batt_replacement_cost = [0.0]
         loan.SystemCosts.om_batt_nameplate = 0
         system_costs = costs['system_capex_per_kw'] * kw
