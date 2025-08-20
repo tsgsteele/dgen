@@ -137,7 +137,7 @@ def calc_system_performance(
         batt.BatterySystem.batt_replacement_option = 0
         batt.batt_minimum_SOC = 10
 
-        pv_to_batt_ratio = 1.31372
+        pv_to_batt_ratio = 1
         batt_capacity_to_power_ratio = 2.0
         desired_size  = kw / pv_to_batt_ratio
         desired_power = desired_size / batt_capacity_to_power_ratio
@@ -415,7 +415,7 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     gen_w      = float(np.sum(utilityrate.SystemOutput.gen))
     kw_w       = batt.BatterySystem.batt_power_charge_max_kwdc
     kwh_w      = batt.Outputs.batt_bank_installed_capacity
-    disp_w     = (batt.Outputs.batt_power.tolist() if hasattr(batt.Outputs.batt_power, 'tolist') else [])
+    disp_w     = list(getattr(batt.Outputs, "batt_to_load", []))
     npv_w      = out_w_loan['npv']
 
     # Pull the exact hourly series SAM actually used
@@ -433,10 +433,6 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     gen_n      = float(np.sum(utilityrate.SystemOutput.gen))
     npv_n      = out_n_loan['npv']
     optimize_time = time.time() - t_opt
-
-    print(f"NPV with battery for {agent.loc['agent_id']}:", npv_w)
-    print(f"NPV without battery for {agent.loc['agent_id']}:", npv_n)
-    print(f"Payback diff for {agent.loc['agent_id']}:", round(out_w_loan['payback'] - out_n_loan['payback'], 1))
 
     if (out_w_loan['payback'] - out_n_loan['payback']) <= 2:
         system_kw     = float(res_w.x)
