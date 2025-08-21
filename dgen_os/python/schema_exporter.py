@@ -14,6 +14,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 import psycopg2 as pg
+from psycopg2 import sql
 
 
 SCHEMA_PREFIX = "diffusion_results_"
@@ -78,15 +79,15 @@ def export_one_schema(
     schema_name: str,
     out_dir: str,
     run_id: str,
-    chunksize: int = 200_000,
+    chunksize: int = 200_000,  # kept for signature compatibility; not used by COPY
     overwrite: bool = True,
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """
-    Stream-export "{schema}.agent_outputs" to a per-state CSV:
-      <out_dir>/<state>/<scenario>_{run_id}.csv
+    Stream-export ALL columns (including 8760 arrays) from "{schema}.agent_outputs"
+    directly to CSV using PostgreSQL COPY. Appends constant identifiers as extra
+    columns in the SELECT so we avoid per-chunk pandas mutation.
 
-    Returns:
-        (schema_name, out_csv_path_or_None_if_skipped, error_message_or_None)
+      Output: <out_dir>/<STATE>/<scenario>_{run_id}.csv
     """
     scenario, state = parse_schema_name(schema_name)
     if not scenario or not state:
@@ -99,29 +100,34 @@ def export_one_schema(
     if not overwrite and os.path.exists(out_csv) and os.path.getsize(out_csv) > 0:
         return (schema_name, None, None)  # skip
 
-    q = f'SELECT * FROM "{schema_name}".agent_outputs'
-    first = True
-    rowcount = 0
-
     try:
-        with _connect(cp) as conn:
-            for chunk in pd.read_sql(q, conn, chunksize=chunksize):
-                # Enrich minimal metadata (handy later)
-                if "scenario" not in chunk.columns:
-                    chunk["scenario"] = scenario
-                if "schema" not in chunk.columns:
-                    chunk["schema"] = schema_name
-                if "state_abbr" not in chunk.columns:
-                    chunk["state_abbr"] = state.upper()
+        # Build the COPY statement safely with psycopg2.sql
+        # We select a.* to preserve all original columns (arrays included)
+        # and inject three constant metadata columns at the end.
+        copy_stmt = sql.SQL(
+            """
+            COPY (
+              SELECT
+                a.*,
+                {scen} AS "scenario",
+                {sch}  AS "schema",
+                {st}   AS "state_abbr"
+              FROM {schema}.{table} AS a
+            ) TO STDOUT WITH CSV HEADER
+            """
+        ).format(
+            scen=sql.Literal(scenario),
+            sch=sql.Literal(schema_name),
+            st=sql.Literal(state.upper()),
+            schema=sql.Identifier(schema_name),
+            table=sql.Identifier("agent_outputs"),
+        )
 
-                chunk.to_csv(out_csv, mode=("w" if first else "a"),
-                             index=False, header=first)
-                first = False
-                rowcount += len(chunk)
+        with _connect(cp) as conn, conn.cursor() as cur, open(out_csv, "w", newline="") as f:
+            cur.copy_expert(copy_stmt.as_string(conn), f)
 
-        # If query returned zero rows, write an empty CSV with at least headers
-        if first:
-            pd.DataFrame(columns=["scenario", "schema", "state_abbr"]).to_csv(out_csv, index=False)
+        # COPY with CSV HEADER writes headers even for zero-row results,
+        # so we can just return success here.
         return (schema_name, out_csv, None)
 
     except Exception as e:
