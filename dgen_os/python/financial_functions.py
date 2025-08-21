@@ -186,26 +186,26 @@ def calc_system_performance(
 
         # Wire up loan pieces for battery case
         loan.BatterySystem.en_batt = 1
-        loan.BatterySystem.batt_computed_bank_capacity = batt.Outputs.batt_bank_installed_capacity
+        loan.BatterySystem.batt_computed_bank_capacity = batt.BatterySystem.batt_power_discharge_max_kwdc
         loan.BatterySystem.batt_bank_replacement = batt.Outputs.batt_bank_replacement
 
         loan.SystemCosts.add_om_num_types = 1
         if kw > 0:
-            loan.SystemCosts.om_capacity = [costs['system_om_per_kw_combined'] + costs['system_variable_om_per_kw_combined']]
+            #loan.SystemCosts.om_capacity = [costs['system_om_per_kw_combined'] + costs['system_variable_om_per_kw_combined']]
             loan.SystemCosts.om_batt_capacity_cost = [0.0]
             loan.SystemCosts.om_batt_variable_cost = [0.0]
             loan.SystemCosts.om_batt_replacement_cost = [0.0]
-            loan.SystemCosts.om_batt_nameplate = batt.Outputs.batt_bank_installed_capacity
+            loan.SystemCosts.om_batt_nameplate = batt.BatterySystem.batt_power_discharge_max_kwdc
             system_costs = costs['system_capex_per_kw_combined'] * kw
         else:
-            loan.SystemCosts.om_capacity = [costs['system_om_per_kw'] + costs['system_variable_om_per_kw']]
+            #loan.SystemCosts.om_capacity = [costs['system_om_per_kw'] + costs['system_variable_om_per_kw']]
             loan.SystemCosts.om_batt_capacity_cost = [0.0]
             loan.SystemCosts.om_batt_variable_cost = [0.0]
             loan.SystemCosts.om_batt_replacement_cost = [0.0]
             loan.SystemCosts.om_batt_nameplate = batt.Outputs.batt_bank_installed_capacity
             system_costs = costs['system_capex_per_kw'] * kw
 
-        loan.SystemCosts.om_production1_values = batt.Outputs.batt_annual_discharge_energy
+        #loan.SystemCosts.om_production1_values = batt.Outputs.batt_annual_discharge_energy
         batt_costs = costs['batt_capex_per_kwh_combined'] * batt.Outputs.batt_bank_installed_capacity * .7 # For the investment tax credit
         value_of_resiliency = agent.loc['value_of_resiliency_usd']
 
@@ -236,7 +236,7 @@ def calc_system_performance(
 
         utilityrate.SystemOutput.gen = gen
         loan.SystemCosts.add_om_num_types = 0
-        loan.SystemCosts.om_capacity = [costs['system_om_per_kw'] + costs['system_variable_om_per_kw']]
+        #loan.SystemCosts.om_capacity = [costs['system_om_per_kw'] + costs['system_variable_om_per_kw']]
         loan.SystemCosts.om_batt_replacement_cost = [0.0]
         loan.SystemCosts.om_batt_nameplate = 0
         system_costs = costs['system_capex_per_kw'] * kw
