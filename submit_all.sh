@@ -11,7 +11,7 @@ JOB_NAME="dgen-small-states-${JOB_TS}"
 gcloud batch jobs submit "${JOB_NAME}" \
   --location="${LOCATION}" \
   --config="batch_job_yamls/dgen-batch-job-small-states.yaml" \
-  --machine-type="c2d-highcpu-16" \
+  --machine-type="c2d-highcpu-8" \
   --provisioning-model="SPOT"
 
 # Define job name with timestamp
