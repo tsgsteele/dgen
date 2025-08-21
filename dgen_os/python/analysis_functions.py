@@ -290,14 +290,14 @@ def compute_portfolio_and_cumulative_savings(
 
     # Cumulative bill savings through year
     if not annual_portfolio.empty:
-        cumulative = (
-            annual_portfolio.sort_values(["state_abbr", "scenario", "year"])
-            .groupby(["state_abbr", "scenario"], as_index=False)
-            .apply(lambda g: g.assign(cumulative_bill_savings=g["portfolio_annual_savings"].cumsum()))
-            .reset_index(drop=True)
+        annual_portfolio = annual_portfolio.sort_values(["state_abbr", "scenario", "year"])
+        cumulative = annual_portfolio.copy()
+        cumulative["cumulative_bill_savings"] = (
+            cumulative.groupby(["state_abbr", "scenario"], observed=True)["portfolio_annual_savings"].cumsum()
         )
     else:
         cumulative = pd.DataFrame(columns=["state_abbr", "scenario", "year", "cumulative_bill_savings"])
+
 
     # Attach lifetime totals for convenience
     annual_portfolio = annual_portfolio.merge(lifetime_totals, on=["state_abbr", "scenario"], how="left")
@@ -334,16 +334,7 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
             "market_share_reached": pd.DataFrame(),
         }
 
-    x = df.copy()
-
-    # Enforce numeric types and defaults
-    for col in (
-        "new_adopters", "number_of_adopters", "first_year_elec_bill_savings",
-        "system_kw", "system_kw_cum", "batt_kwh_cum",
-        "customers_in_bin", "max_market_share", "avg_elec_price_cents_per_kwh"
-    ):
-        if col in x.columns:
-            x[col] = pd.to_numeric(x[col], errors="coerce")
+    x = df
 
     x["new_adopters"] = x.get("new_adopters", 0.0).fillna(0.0)
     x["number_of_adopters"] = x.get("number_of_adopters", 0.0).fillna(0.0)
@@ -353,9 +344,9 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
 
     # Median PV system size by state/year/scenario
     median_kw = (
-        x.groupby(["state_abbr", "year", "scenario"], as_index=False)["system_kw"]
-         .median()
-         .rename(columns={"system_kw": "median_system_kw"})
+        x.groupby(["state_abbr", "year", "scenario"], observed=True)["system_kw"]
+        .quantile(0.5, interpolation="linear")
+        .reset_index(name="median_system_kw")
     )
 
     # Yearly totals for cumulative series and adopters
