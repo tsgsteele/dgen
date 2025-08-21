@@ -104,7 +104,6 @@ def _read_with_selected_cols(path: str) -> pd.DataFrame:
         df["scenario"] = "baseline" if "baseline" in filename else ("policy" if "policy" in filename else np.nan)
 
     if df["state_abbr"].isna().any():
-        # Directory name is used as state; normalized to upper-case
         state = os.path.basename(os.path.dirname(path)).upper()
         df.loc[df["state_abbr"].isna(), "state_abbr"] = state
 
@@ -162,7 +161,6 @@ def stream_combine_two_csvs(baseline_csv: Optional[str], policy_csv: Optional[st
         if not path or not os.path.exists(path):
             continue
         for chunk in pd.read_csv(path, chunksize=chunksize):
-            # Ensure required identifiers exist
             if "scenario" not in chunk.columns:
                 chunk["scenario"] = "baseline" if "baseline" in os.path.basename(path).lower() else "policy"
             if "state_abbr" not in chunk.columns:
@@ -179,12 +177,6 @@ def stream_combine_two_csvs(baseline_csv: Optional[str], policy_csv: Optional[st
 class SavingsConfig:
     """
     Configuration for bill savings aggregation.
-
-    lifetime_years:
-        Years of savings credited to each cohort when computing cohort lifetime totals.
-    cap_to_horizon:
-        If True, limit credited years for each cohort to the visible modeling horizon
-        (i.e., min(lifetime_years, last_year - cohort_year + 1)).
     """
     lifetime_years: int = 25
     cap_to_horizon: bool = False
@@ -196,22 +188,6 @@ def compute_portfolio_and_cumulative_savings(
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Compute portfolio-level bill savings by carrying cohorts forward.
-
-    Definitions:
-        - Cohort annual savings in the year of adoption:
-              cohort_annual_savings = first_year_elec_bill_savings * new_adopters
-          (assumes first-year savings is representative for all subsequent years)
-        - Portfolio annual savings in year t:
-              sum of cohort_annual_savings for all cohorts with cohort_year <= t
-        - Cumulative bill savings through year t:
-              cumulative sum of portfolio_annual_savings from start to t
-        - Lifetime savings total (per state/scenario):
-              sum over cohorts of (cohort_annual_savings * credited_years),
-              where credited_years = cfg.lifetime_years or, if cap_to_horizon,
-              min(cfg.lifetime_years, last_year - cohort_year + 1)
-
-    Returns:
-        (annual_portfolio_savings_df, cumulative_savings_df)
     """
     if df.empty:
         empty_annual = pd.DataFrame(columns=["state_abbr", "scenario", "year", "portfolio_annual_savings", "lifetime_savings_total"])
@@ -222,10 +198,8 @@ def compute_portfolio_and_cumulative_savings(
     x["new_adopters"] = pd.to_numeric(x.get("new_adopters", 0.0), errors="coerce").fillna(0.0)
     x["first_year_elec_bill_savings"] = pd.to_numeric(x.get("first_year_elec_bill_savings", 0.0), errors="coerce").fillna(0.0)
 
-    # Cohort-level annual savings
     x["cohort_annual_savings"] = x["first_year_elec_bill_savings"] * x["new_adopters"]
 
-    # Collapse to one row per (state, scenario, cohort_year)
     cohorts = (
         x.groupby(["state_abbr", "scenario", "year"], as_index=False)["cohort_annual_savings"]
          .sum()
@@ -233,7 +207,6 @@ def compute_portfolio_and_cumulative_savings(
          .sort_values(["state_abbr", "scenario", "cohort_year"])
     )
 
-    # Determine year horizon; handle missing carefully
     year_vals = pd.to_numeric(df["year"], errors="coerce").dropna()
     if year_vals.empty:
         empty_annual = pd.DataFrame(columns=["state_abbr", "scenario", "year", "portfolio_annual_savings", "lifetime_savings_total"])
@@ -250,7 +223,6 @@ def compute_portfolio_and_cumulative_savings(
     for (state, scen), g in cohorts.groupby(["state_abbr", "scenario"]):
         mapping = dict(zip(g["cohort_year"], g["cohort_annual_savings"]))
 
-        # Portfolio annual savings via prefix sum over years
         running = 0.0
         rows = []
         for y in all_years:
@@ -259,7 +231,6 @@ def compute_portfolio_and_cumulative_savings(
         ann_df = pd.DataFrame(rows, columns=["state_abbr", "scenario", "year", "portfolio_annual_savings"])
         annual_frames.append(ann_df)
 
-        # Lifetime totals per cohort
         lf = cfg.lifetime_years
         if cfg.cap_to_horizon:
             credited = {cy: max(0, min(lf, year_max - cy + 1)) for cy in g["cohort_year"]}
@@ -288,7 +259,6 @@ def compute_portfolio_and_cumulative_savings(
         pd.DataFrame(columns=["state_abbr", "scenario", "lifetime_savings_total"])
     )
 
-    # Cumulative bill savings through year
     if not annual_portfolio.empty:
         annual_portfolio = annual_portfolio.sort_values(["state_abbr", "scenario", "year"])
         cumulative = annual_portfolio.copy()
@@ -298,8 +268,6 @@ def compute_portfolio_and_cumulative_savings(
     else:
         cumulative = pd.DataFrame(columns=["state_abbr", "scenario", "year", "cumulative_bill_savings"])
 
-
-    # Attach lifetime totals for convenience
     annual_portfolio = annual_portfolio.merge(lifetime_totals, on=["state_abbr", "scenario"], how="left")
     cumulative = cumulative.merge(lifetime_totals, on=["state_abbr", "scenario"], how="left")
 
@@ -309,18 +277,6 @@ def compute_portfolio_and_cumulative_savings(
 def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, pd.DataFrame]:
     """
     Aggregate per-state metrics into compact frames for plotting and export.
-
-    Returns:
-        {
-            "median_system_kw": DataFrame[state_abbr, year, scenario, median_system_kw],
-            "totals": DataFrame[state_abbr, year, scenario, batt_kwh_cum, system_kw_cum, number_of_adopters],
-            "tech_2040": DataFrame[state_abbr, scenario, number_of_adopters, customers_in_bin, percent_tech_potential],
-            "portfolio_annual_savings": DataFrame[state_abbr, scenario, year, portfolio_annual_savings, lifetime_savings_total],
-            "cumulative_bill_savings": DataFrame[state_abbr, scenario, year, cumulative_bill_savings, lifetime_savings_total],
-            "lifetime_totals": DataFrame[state_abbr, scenario, lifetime_savings_total],
-            "avg_price_2026_model": DataFrame[state_abbr, avg_elec_price_cents_per_kwh],
-            "market_share_reached": DataFrame[state_abbr, year, scenario, market_potential, market_reached, market_share_reached],
-        }
     """
     if df.empty:
         return {
@@ -342,14 +298,12 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
     x["customers_in_bin"] = x.get("customers_in_bin", 0.0).fillna(0.0)
     x["max_market_share"] = x.get("max_market_share", 0.0).fillna(0.0)
 
-    # Median PV system size by state/year/scenario
     median_kw = (
         x.groupby(["state_abbr", "year", "scenario"], observed=True)["system_kw"]
         .quantile(0.5, interpolation="linear")
         .reset_index(name="median_system_kw")
     )
 
-    # Yearly totals for cumulative series and adopters
     totals = (
         x.groupby(["state_abbr", "year", "scenario"], as_index=False)
          .agg(
@@ -359,7 +313,6 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
          )
     )
 
-    # Technical potential reached in 2040
     tech_2040_src = x.loc[x["year"] == 2040, ["state_abbr", "scenario", "number_of_adopters", "customers_in_bin"]]
     tech_2040 = tech_2040_src.groupby(["state_abbr", "scenario"], as_index=False).sum()
     if not tech_2040.empty:
@@ -369,7 +322,6 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
             np.nan,
         )
 
-    # Portfolio-annual and cumulative bill savings (uses new_adopters)
     portfolio_annual, cumulative_savings = compute_portfolio_and_cumulative_savings(x, cfg)
     lifetime_totals = (
         portfolio_annual[["state_abbr", "scenario", "lifetime_savings_total"]]
@@ -377,14 +329,12 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
         .reset_index(drop=True)
     )
 
-        # Baseline model average price in 2026 (customer-weighted by customers_in_bin)
     if (
         "avg_elec_price_cents_per_kwh" in x.columns
         and "customers_in_bin" in x.columns
         and x["avg_elec_price_cents_per_kwh"].notna().any()
     ):
         price_2026 = x[(x["year"] == 2026) & (x["scenario"] == "baseline")].copy()
-        # Ensure weights are non-negative and handle NaNs as zero weight
         price_2026["customers_in_bin"] = price_2026["customers_in_bin"].fillna(0.0).clip(lower=0.0)
 
         def _weighted_avg(g: pd.DataFrame) -> float:
@@ -401,7 +351,6 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
     else:
         avg_price_2026_model = pd.DataFrame(columns=["state_abbr", "avg_elec_price_cents_per_kwh"])
 
-    # Market share reached (using cumulative number_of_adopters for that year)
     x["market_potential"] = x["customers_in_bin"] * x["max_market_share"]
     market_share = (
         x.groupby(["state_abbr", "year", "scenario"], as_index=False)
@@ -433,7 +382,6 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
 # =============================================================================
 
 def _process_one_state(args) -> Dict[str, pd.DataFrame]:
-    """Private worker wrapper for multiprocessing."""
     state_dir, run_id, cfg = args
     df = load_state_df(state_dir, run_id)
     return aggregate_state_metrics(df, cfg)
@@ -447,20 +395,6 @@ def process_all_states(
 ) -> Dict[str, pd.DataFrame]:
     """
     Aggregate small, plot-ready DataFrames across all states.
-
-    Args:
-        root_dir:
-            Parent directory containing per-state subfolders.
-        run_id:
-            If provided, prefer baseline_{run_id}.csv / policy_{run_id}.csv in each state folder.
-        cfg:
-            SavingsConfig controlling lifetime savings behavior.
-        n_jobs:
-            Number of parallel worker processes across states. For I/O-bound workloads on SSDs,
-            4–8 is often a good starting point. On HDDs/USB drives, reduce to avoid thrashing.
-
-    Returns:
-        Dictionary of concatenated DataFrames keyed by metric name.
     """
     state_dirs = discover_state_dirs(root_dir)
     if not state_dirs:
@@ -482,12 +416,10 @@ def process_all_states(
     if n_jobs == 1:
         outputs = [_process_one_state(t) for t in tasks]
     else:
-        # On macOS, the start method is "spawn" by default; ensure top-level functions only.
         with Pool(processes=n_jobs) as pool:
             for result in pool.imap_unordered(_process_one_state, tasks):
                 outputs.append(result)
 
-    # Concatenate by metric key
     merged: Dict[str, List[pd.DataFrame]] = {}
     for out in outputs:
         for key, df in out.items():
@@ -511,29 +443,105 @@ def facet_lines_by_state(
     sharey: bool = False
 ) -> None:
     """
-    Faceted line plot by state comparing Baseline vs Policy.
-
-    Args:
-        df: Tidy DataFrame with columns ['state_abbr','year','scenario', y_col].
-        y_col: Value column to plot.
-        ylabel: Y-axis label.
-        title: Figure title.
-        xticks: X-axis ticks (years).
-        height: Facet height (inches).
-        col_wrap: Number of facets per row.
-        sharey: Share Y axis across facets (False by default).
+    Faceted line plot by state comparing Baseline vs Policy, with end-of-horizon annotations
+    at 2040 (or the last available year in that state).
     """
     if df.empty:
         return
+
+    # Formatting helper for labels
+    def _fmt(v: float) -> str:
+        m = y_col
+        if m == "number_of_adopters":
+            return f"{v/1e6:.1f}M"
+        if m == "system_kw_cum":
+            return f"{v/1e6:.1f} GW"     # kW -> GW
+        if m == "batt_kwh_cum":
+            return f"{v/1e6:.1f} GWh"    # kWh -> GWh
+        if m == "cumulative_bill_savings":
+            return f"${v/1e9:.1f}B"
+        if m == "portfolio_annual_savings":
+            return f"${v/1e9:.1f}B/yr"
+        if m in ("median_system_kw", "system_kw"):
+            return f"{v:.1f} kW"
+        if m == "market_share_reached":
+            return f"{v*100:.1f}%"
+        return f"{v:.2g}"
+
     sns.set_context("talk", rc={"lines.linewidth": 2})
     g = sns.FacetGrid(df, col="state_abbr", col_wrap=col_wrap, height=height, sharey=sharey)
+
+    # draw lines
     g.map_dataframe(sns.lineplot, x="year", y=y_col, hue="scenario", marker="o")
     g.set_titles("{col_name}")
     g.set_axis_labels("Year", ylabel)
     g.set(xticks=list(xticks))
     g.add_legend()
     g.fig.suptitle(title, y=1.02)
-    plt.tight_layout()
+
+    # Pick the preferred annotation year globally (fall back to max available per state)
+    global_years = pd.to_numeric(df["year"], errors="coerce").dropna().astype(int)
+    preferred_year = 2040 if (len(global_years) and 2040 in set(global_years)) else (int(global_years.max()) if len(global_years) else None)
+
+    # annotate per facet (per state)
+    if preferred_year is not None:
+        for state, ax in g.axes_dict.items():
+            sdf = df[(df["state_abbr"] == state)].copy()
+            if sdf.empty or y_col not in sdf.columns:
+                continue
+            sdf = sdf.dropna(subset=[y_col, "year"])
+
+            # pick year for this state
+            years = sdf["year"].astype(int).unique()
+            end_year = preferred_year if preferred_year in years else int(sdf["year"].max())
+
+            # collect end points for each scenario present
+            end_points = []
+            for scen, sg in sdf.groupby("scenario"):
+                sg = sg.sort_values("year")
+                # prefer the exact year; else the latest <= end_year
+                g_end = sg[sg["year"] == end_year]
+                if g_end.empty:
+                    g_end = sg[sg["year"] <= end_year].tail(1)
+                if not g_end.empty:
+                    x_end = float(g_end["year"].iloc[-1])
+                    y_end = float(g_end[y_col].iloc[-1])
+                    end_points.append((scen, x_end, y_end))
+
+            if not end_points:
+                continue
+
+            # tiny vertical jitter to avoid overlap if values are very close
+            sv = sdf[y_col].to_numpy()
+            vmin = float(np.nanmin(sv)) if sv.size else 0.0
+            vmax = float(np.nanmax(sv)) if sv.size else 1.0
+            yrange = max(1.0, vmax - vmin)
+            sep_needed = yrange * 0.01  # 1% of the local range
+
+            used_y = []
+            for scen, x_end, y_end in sorted(end_points, key=lambda t: t[2]):
+                offset_pts = 0
+                for uy in used_y:
+                    if abs(y_end - uy) < sep_needed:
+                        offset_pts += 6  # nudge down a bit
+                used_y.append(y_end)
+
+                ax.annotate(
+                    _fmt(y_end),
+                    xy=(x_end, y_end),
+                    xytext=(6, offset_pts),
+                    textcoords="offset points",
+                    ha="left",
+                    va="center",
+                    fontsize=9,
+                    fontweight="bold",
+                )
+
+            # # pad x-limits slightly to ensure labels at the right edge aren't clipped
+            # xmin, xmax = ax.get_xlim()
+            # ax.set_xlim(xmin, xmax + 0.4)
+
+    # Avoid tight_layout warnings by relying on default layout
     plt.show()
 
 
@@ -548,7 +556,7 @@ def bar_tech_potential_2040(tech_agg: pd.DataFrame, title: str = "Solar Technica
         .sort_values("percent_tech_potential", ascending=False)["state_abbr"]
         .tolist()
     )
-    plt.figure(figsize=(14, 6))
+    plt.figure(figsize=(14, 6), constrained_layout=True)
     ax = sns.barplot(
         data=tech_agg, x="state_abbr", y="percent_tech_potential",
         hue="scenario", order=order, errorbar=None
@@ -572,7 +580,6 @@ def bar_tech_potential_2040(tech_agg: pd.DataFrame, title: str = "Solar Technica
     plt.xlabel("State")
     plt.xticks(rotation=45)
     plt.ylim(0, tech_agg["percent_tech_potential"].max() * 1.1)
-    plt.tight_layout()
     plt.show()
 
 
@@ -596,4 +603,321 @@ __all__ = [
     # Plotting
     "facet_lines_by_state",
     "bar_tech_potential_2040",
+
+    # US deltas & totals
+    "build_national_deltas",
+    "facet_lines_all_states_delta",
+    "build_national_totals",
+    "facet_lines_national_totals",
 ]
+
+# =============================================================================
+# National deltas: Policy − Baseline (summed across states)
+# =============================================================================
+
+def build_national_deltas(outputs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """
+    Return tidy national deltas: ['year','metric','value'], where
+    value = (policy − baseline).
+    """
+    years_seen = []
+    for k in ("totals", "portfolio_annual_savings", "cumulative_bill_savings", "market_share_reached"):
+        dfk = outputs.get(k, pd.DataFrame())
+        if not dfk.empty and "year" in dfk.columns:
+            years_seen.append(dfk["year"])
+    if not years_seen:
+        return pd.DataFrame(columns=["year", "metric", "value"])
+
+    year_min = int(pd.concat(years_seen).min())
+    year_max = int(pd.concat(years_seen).max())
+    all_years = pd.Index(range(year_min, year_max + 1), name="year")
+
+    pieces: List[pd.DataFrame] = []
+
+    def _delta_from_series(df: pd.DataFrame, value_col: str, cumulative: bool) -> pd.DataFrame:
+        if df.empty:
+            return pd.DataFrame(columns=["year", "value"])
+        def _fill(g: pd.DataFrame) -> pd.DataFrame:
+            s = g.set_index("year")[[value_col]].reindex(all_years)
+            s = (s.ffill() if cumulative else s.fillna(0.0)).fillna(0.0)
+            s = s.reset_index()
+            s["state_abbr"] = g["state_abbr"].iloc[0]
+            s["scenario"] = g["scenario"].iloc[0]
+            return s
+        filled = (
+            df.groupby(["state_abbr", "scenario"], observed=True, as_index=False)
+              .apply(_fill)
+              .reset_index(drop=True)
+        )
+        nat = filled.groupby(["year", "scenario"], as_index=False)[value_col].sum()
+        piv = nat.pivot(index="year", columns="scenario", values=value_col)
+        if "policy" not in piv.columns or "baseline" not in piv.columns:
+            return pd.DataFrame(columns=["year", "value"])
+        out = piv["policy"].sub(piv["baseline"]).rename("value").reset_index()
+        return out
+
+    totals = outputs.get("totals", pd.DataFrame())
+    for col, metric in [
+        ("number_of_adopters", "number_of_adopters"),
+        ("system_kw_cum", "system_kw_cum"),
+        ("batt_kwh_cum", "batt_kwh_cum"),
+    ]:
+        if not totals.empty and col in totals.columns:
+            d = _delta_from_series(totals[["state_abbr","year","scenario",col]].copy(), col, cumulative=True)
+            if not d.empty:
+                d["metric"] = metric
+                pieces.append(d)
+
+    pas = outputs.get("portfolio_annual_savings", pd.DataFrame())
+    if not pas.empty and "portfolio_annual_savings" in pas.columns:
+        d = _delta_from_series(pas[["state_abbr","year","scenario","portfolio_annual_savings"]].copy(),
+                               "portfolio_annual_savings", cumulative=False)
+        if not d.empty:
+            d["metric"] = "portfolio_annual_savings"
+            pieces.append(d)
+
+    cbs = outputs.get("cumulative_bill_savings", pd.DataFrame())
+    if not cbs.empty and "cumulative_bill_savings" in cbs.columns:
+        d = _delta_from_series(cbs[["state_abbr","year","scenario","cumulative_bill_savings"]].copy(),
+                               "cumulative_bill_savings", cumulative=True)
+        if not d.empty:
+            d["metric"] = "cumulative_bill_savings"
+            pieces.append(d)
+
+    return pd.concat(pieces, ignore_index=True) if pieces else pd.DataFrame(columns=["year","metric","value"])
+
+
+def facet_lines_all_states_delta(
+    outputs: Dict[str, pd.DataFrame],
+    metrics: Optional[Iterable[str]] = None,
+    xticks: Iterable[int] = (2026, 2030, 2035, 2040),
+    title: str = "Policy − Baseline (U.S. Totals)",
+    ncols: int = 3,
+) -> None:
+    """
+    Simple subplots for national deltas (policy − baseline). No annotations.
+    """
+    df = build_national_deltas(outputs)
+    if df.empty:
+        return
+
+    if metrics:
+        df = df[df["metric"].isin(set(metrics))]
+        if df.empty:
+            return
+
+    nice_titles = {
+        "number_of_adopters": "Δ Cumulative Adopters",
+        "system_kw_cum": "Δ Cumulative PV (kW)",
+        "batt_kwh_cum": "Δ Cumulative Storage (kWh)",
+        "portfolio_annual_savings": "Δ Portfolio Bill Savings ($/yr)",
+        "cumulative_bill_savings": "Δ Cumulative Bill Savings ($)",
+    }
+
+    metric_list = list(df["metric"].unique())
+    n = len(metric_list)
+    ncols = max(1, min(ncols, n))
+    nrows = int(math.ceil(n / ncols))
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(6*ncols, 3.3*nrows), constrained_layout=True)
+    axes = np.atleast_1d(axes).ravel()
+
+    for i, m in enumerate(metric_list):
+        ax = axes[i]
+        d = df[df["metric"] == m].sort_values("year")
+        ax.plot(d["year"], d["value"], marker="o")
+        ax.axhline(0.0, linestyle="--", linewidth=1)
+        ax.set_xticks(list(xticks))
+        ax.set_title(nice_titles.get(m, m))
+        ax.set_xlabel("Year")
+        ax.set_ylabel("Policy − Baseline")
+
+    # Hide any extra axes
+    for j in range(i+1, len(axes)):
+        axes[j].set_visible(False)
+
+    fig.suptitle(title, y=1.05)
+    plt.show()
+
+
+# =============================================================================
+# National totals: Baseline vs Policy (summed across states)
+# =============================================================================
+
+def build_national_totals(outputs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """
+    Build tidy national totals across states, per scenario:
+        ['year', 'scenario', 'metric', 'value']
+    """
+    years_seen = []
+    for k in ("totals", "portfolio_annual_savings", "cumulative_bill_savings"):
+        dfk = outputs.get(k, pd.DataFrame())
+        if not dfk.empty and "year" in dfk.columns:
+            years_seen.append(dfk["year"])
+    if not years_seen:
+        return pd.DataFrame(columns=["year", "scenario", "metric", "value"])
+
+    year_min = int(pd.concat(years_seen).min())
+    year_max = int(pd.concat(years_seen).max())
+    all_years = pd.Index(range(year_min, year_max + 1), name="year")
+
+    pieces: List[pd.DataFrame] = []
+
+    def _sum_series(df: pd.DataFrame, value_col: str, cumulative: bool) -> pd.DataFrame:
+        if df.empty or value_col not in df.columns:
+            return pd.DataFrame(columns=["year", "scenario", "value"])
+        def _fill(g: pd.DataFrame) -> pd.DataFrame:
+            s = g.set_index("year")[[value_col]].reindex(all_years)
+            s = (s.ffill() if cumulative else s.fillna(0.0)).fillna(0.0)
+            s = s.reset_index()
+            s["state_abbr"] = g["state_abbr"].iloc[0]
+            s["scenario"] = g["scenario"].iloc[0]
+            return s
+        filled = (
+            df.groupby(["state_abbr", "scenario"], observed=True, as_index=False)
+              .apply(_fill)
+              .reset_index(drop=True)
+        )
+        nat = filled.groupby(["year", "scenario"], as_index=False)[value_col].sum()
+        nat = nat.rename(columns={value_col: "value"})
+        return nat
+
+    totals = outputs.get("totals", pd.DataFrame())
+    if not totals.empty:
+        for col in ("number_of_adopters", "system_kw_cum", "batt_kwh_cum"):
+            s = _sum_series(totals[["state_abbr", "year", "scenario", col]].copy(), col, cumulative=True)
+            if not s.empty:
+                s["metric"] = col
+                pieces.append(s)
+
+    cbs = outputs.get("cumulative_bill_savings", pd.DataFrame())
+    if not cbs.empty:
+        s = _sum_series(cbs[["state_abbr", "year", "scenario", "cumulative_bill_savings"]].copy(),
+                        "cumulative_bill_savings", cumulative=True)
+        if not s.empty:
+            s["metric"] = "cumulative_bill_savings"
+            pieces.append(s)
+
+    pas = outputs.get("portfolio_annual_savings", pd.DataFrame())
+    if not pas.empty:
+        s = _sum_series(pas[["state_abbr", "year", "scenario", "portfolio_annual_savings"]].copy(),
+                        "portfolio_annual_savings", cumulative=False)
+        if not s.empty:
+            s["metric"] = "portfolio_annual_savings"
+            pieces.append(s)
+
+    return pd.concat(pieces, ignore_index=True) if pieces else pd.DataFrame(columns=["year", "scenario", "metric", "value"])
+
+
+def facet_lines_national_totals(
+    outputs: Dict[str, pd.DataFrame],
+    metrics: Optional[Iterable[str]] = ("number_of_adopters", "system_kw_cum", "batt_kwh_cum", "cumulative_bill_savings"),
+    xticks: Iterable[int] = (2026, 2030, 2035, 2040),
+    title: str = "U.S. Totals: Baseline vs Policy",
+    ncols: int = 3,
+) -> None:
+    """
+    Subplots for national totals (Baseline vs Policy) with annotations at 2040.
+    If 2040 is not available, annotate the last available year.
+    """
+    nat = build_national_totals(outputs)
+    if nat.empty:
+        return
+
+    if metrics:
+        nat = nat[nat["metric"].isin(set(metrics))]
+        if nat.empty:
+            return
+
+    nice_titles = {
+        "number_of_adopters": "Cumulative Adopters",
+        "system_kw_cum": "Cumulative PV (kW)",
+        "batt_kwh_cum": "Cumulative Storage (kWh)",
+        "cumulative_bill_savings": "Cumulative Bill Savings ($)",
+        "portfolio_annual_savings": "Portfolio Bill Savings ($/yr)",
+    }
+
+    # Formatting helper for end-of-horizon labels
+    def _fmt(metric: str, v: float) -> str:
+        if metric == "number_of_adopters":
+            return f"{v/1e6:.1f}M"
+        if metric == "system_kw_cum":
+            # kW -> GW
+            return f"{v/1e6:.1f} GW"
+        if metric == "batt_kwh_cum":
+            # kWh -> GWh
+            return f"{v/1e6:.1f} GWh"
+        if metric == "cumulative_bill_savings":
+            return f"${v/1e9:.1f}B"
+        if metric == "portfolio_annual_savings":
+            return f"${v/1e9:.1f}B/yr"
+        # fallback with 2 sig figs
+        return f"{v:.2g}"
+
+    metric_list = list(nat["metric"].unique())
+    n = len(metric_list)
+    ncols = max(1, min(ncols, n))
+    nrows = int(math.ceil(n / ncols))
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(6*ncols, 3.4*nrows), constrained_layout=True)
+    axes = np.atleast_1d(axes).ravel()
+
+    for i, m in enumerate(metric_list):
+        ax = axes[i]
+        d = nat[nat["metric"] == m].sort_values("year")
+
+        # Choose the annotation year: prefer 2040, else max available
+        years = d["year"].unique()
+        end_year = 2040 if 2040 in years else int(d["year"].max())
+
+        # Plot each scenario and store end-year values for annotation
+        end_points = []
+        for scen, g in d.groupby("scenario"):
+            g_sorted = g.sort_values("year")
+            ax.plot(g_sorted["year"], g_sorted["value"], marker="o", label=scen.capitalize())
+            # value at end_year (or most recent <= end_year)
+            g_end = g_sorted[g_sorted["year"] == end_year]
+            if g_end.empty:
+                g_end = g_sorted[g_sorted["year"] <= end_year].tail(1)
+            if not g_end.empty:
+                end_points.append((scen, float(g_end["year"].iloc[-1]), float(g_end["value"].iloc[-1])))
+
+        ax.set_xticks(list(xticks))
+        ax.set_title(nice_titles.get(m, m))
+        ax.set_xlabel("Year")
+        ax.set_ylabel("U.S. Total")
+        ax.legend(frameon=False, loc="best")
+
+        # Annotations: offset to avoid overlap if values are very close
+        if end_points:
+            # Compute a tiny vertical jitter if two labels are nearly identical
+            ys = np.array([p[2] for p in end_points])
+            yrange = max(1.0, float(d["value"].max() - d["value"].min()) or 1.0)
+            sep_needed = yrange * 0.01  # 1% of range
+            used_offsets = {}
+            for scen, x_end, y_end in sorted(end_points, key=lambda t: t[2]):
+                # If another label is within sep_needed, nudge this one
+                offset_pts = 0
+                for other_y in used_offsets.keys():
+                    if abs(y_end - other_y) < sep_needed:
+                        offset_pts += 6
+                used_offsets[y_end] = True
+
+                ax.annotate(
+                    _fmt(m, y_end),
+                    xy=(x_end, y_end),
+                    xytext=(6, offset_pts),
+                    textcoords="offset points",
+                    ha="left",
+                    va="center",
+                    fontsize=10,
+                    fontweight="bold",
+                )
+
+    # Hide any extra axes
+    for j in range(i + 1, len(axes)):
+        axes[j].set_visible(False)
+
+    fig.suptitle(title, y=1.05)
+    plt.show()
+

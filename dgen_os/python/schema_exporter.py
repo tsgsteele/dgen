@@ -79,55 +79,86 @@ def export_one_schema(
     schema_name: str,
     out_dir: str,
     run_id: str,
-    chunksize: int = 200_000,  # kept for signature compatibility; not used by COPY
+    chunksize: int = 200_000,  # unused by COPY
     overwrite: bool = True,
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """
-    Stream-export ALL columns (including 8760 arrays) from "{schema}.agent_outputs"
-    directly to CSV using PostgreSQL COPY. Appends constant identifiers as extra
-    columns in the SELECT so we avoid per-chunk pandas mutation.
-
-      Output: <out_dir>/<STATE>/<scenario>_{run_id}.csv
+    Stream-export ONLY selected columns from "{schema}.agent_outputs", explicitly excluding
+    the huge text columns that contain hourly arrays/lists.
     """
+    import re
+    from psycopg2 import sql as _sql
+
+    # Explicit excludes (the four heavy text columns you listed)
+    EXCLUDE_COLS = {
+        "wholesale_prices_ndarray",
+        "consumption_hourly_list",
+        "generation_hourly_list",
+        "batt_dispatch_profile_list",
+    }
+    # Optional pattern-based excludes (covers future hourly-like columns)
+    # Set EXPORT_EXCLUDE_REGEX to override, e.g. "(?:_hourly_|_ndarray$|_profile_list$|_list$)"
+    exclude_regex = os.getenv("EXPORT_EXCLUDE_REGEX", r"(?:_hourly_|_ndarray$|_profile_list$|_list$)")
+    exclude_re = re.compile(exclude_regex, re.IGNORECASE)
+
     scenario, state = parse_schema_name(schema_name)
     if not scenario or not state:
         return (schema_name, None, f"Unrecognized schema pattern: {schema_name}")
 
     per_state_dir = os.path.join(out_dir, state)
     _ensure_dir(per_state_dir)
-
     out_csv = os.path.join(per_state_dir, f"{scenario}_{run_id}.csv")
+
     if not overwrite and os.path.exists(out_csv) and os.path.getsize(out_csv) > 0:
         return (schema_name, None, None)  # skip
 
     try:
-        # Build the COPY statement safely with psycopg2.sql
-        # We select a.* to preserve all original columns (arrays included)
-        # and inject three constant metadata columns at the end.
-        copy_stmt = sql.SQL(
+        with _connect(cp) as conn, conn.cursor() as cur:
+            # Discover all columns (we'll exclude by name/pattern)
+            meta_sql = """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = %s AND table_name = %s
+                ORDER BY ordinal_position
             """
-            COPY (
-              SELECT
-                a.*,
-                {scen} AS "scenario",
-                {sch}  AS "schema",
-                {st}   AS "state_abbr"
-              FROM {schema}.{table} AS a
-            ) TO STDOUT WITH CSV HEADER
-            """
-        ).format(
-            scen=sql.Literal(scenario),
-            sch=sql.Literal(schema_name),
-            st=sql.Literal(state.upper()),
-            schema=sql.Identifier(schema_name),
-            table=sql.Identifier("agent_outputs"),
-        )
+            cols_df = pd.read_sql(meta_sql, conn, params=(schema_name, "agent_outputs"))
+            all_cols = [r["column_name"] for _, r in cols_df.iterrows()]
 
-        with _connect(cp) as conn, conn.cursor() as cur, open(out_csv, "w", newline="") as f:
-            cur.copy_expert(copy_stmt.as_string(conn), f)
+            # Keep everything EXCEPT the hourly/ndarray text blobs
+            selected_cols = [
+                c for c in all_cols
+                if c not in EXCLUDE_COLS and not exclude_re.search(c)
+            ]
+            if not selected_cols:
+                return (schema_name, None, f"No columns left after exclusion for {schema_name}.agent_outputs")
 
-        # COPY with CSV HEADER writes headers even for zero-row results,
-        # so we can just return success here.
+            col_list_sql = _sql.SQL(", ").join(
+                [_sql.SQL("a.{}").format(_sql.Identifier(c)) for c in selected_cols]
+            )
+
+            copy_stmt = _sql.SQL(
+                """
+                COPY (
+                  SELECT
+                    {col_list},
+                    {scen} AS "scenario",
+                    {sch}  AS "schema",
+                    {st}   AS "state_abbr"
+                  FROM {schema}.{table} AS a
+                ) TO STDOUT WITH CSV HEADER
+                """
+            ).format(
+                col_list=col_list_sql,
+                scen=_sql.Literal(scenario),
+                sch=_sql.Literal(schema_name),
+                st=_sql.Literal(state.upper()),
+                schema=_sql.Identifier(schema_name),
+                table=_sql.Identifier("agent_outputs"),
+            )
+
+            with open(out_csv, "w", newline="") as f:
+                cur.copy_expert(copy_stmt.as_string(conn), f)
+
         return (schema_name, out_csv, None)
 
     except Exception as e:
