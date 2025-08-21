@@ -434,7 +434,8 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     npv_n      = out_n_loan['npv']
     optimize_time = time.time() - t_opt
 
-    if (out_w_loan['payback'] - out_n_loan['payback']) <= 2:
+    #if (out_w_loan['payback'] - out_n_loan['payback']) <= 1:
+    if npv_w >= npv_n:
         system_kw     = float(res_w.x)
         annual_kwh    = gen_w
         first_with    = out_w_util['utility_bill_w_sys_year1']
