@@ -202,7 +202,7 @@ def calc_system_performance(
             loan.SystemCosts.om_batt_capacity_cost = [0.0]
             loan.SystemCosts.om_batt_variable_cost = [0.0]
             loan.SystemCosts.om_batt_replacement_cost = [0.0]
-            loan.SystemCosts.om_batt_nameplate = batt.Outputs.batt_bank_installed_capacity
+            loan.SystemCosts.om_batt_nameplate = batt.BatterySystem.batt_power_discharge_max_kwdc
             system_costs = costs['system_capex_per_kw'] * kw
 
         #loan.SystemCosts.om_production1_values = batt.Outputs.batt_annual_discharge_energy
@@ -434,8 +434,7 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     npv_n      = out_n_loan['npv']
     optimize_time = time.time() - t_opt
 
-    #if (out_w_loan['payback'] - out_n_loan['payback']) <= 1:
-    if npv_w >= npv_n:
+    if (out_w_loan['payback'] - out_n_loan['payback']) <= 2:
         system_kw     = float(res_w.x)
         annual_kwh    = gen_w
         first_with    = out_w_util['utility_bill_w_sys_year1']
