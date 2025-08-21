@@ -195,14 +195,14 @@ def calc_system_performance(
             loan.SystemCosts.om_batt_capacity_cost = [0.0]
             loan.SystemCosts.om_batt_variable_cost = [0.0]
             loan.SystemCosts.om_batt_replacement_cost = [0.0]
-            loan.SystemCosts.om_batt_nameplate = batt.BatterySystem.batt_power_discharge_max_kwdc
+            #loan.SystemCosts.om_batt_nameplate = batt.BatterySystem.batt_power_discharge_max_kwdc
             system_costs = costs['system_capex_per_kw_combined'] * kw
         else:
             #loan.SystemCosts.om_capacity = [costs['system_om_per_kw'] + costs['system_variable_om_per_kw']]
             loan.SystemCosts.om_batt_capacity_cost = [0.0]
             loan.SystemCosts.om_batt_variable_cost = [0.0]
             loan.SystemCosts.om_batt_replacement_cost = [0.0]
-            loan.SystemCosts.om_batt_nameplate = batt.BatterySystem.batt_power_discharge_max_kwdc
+            #loan.SystemCosts.om_batt_nameplate = batt.BatterySystem.batt_power_discharge_max_kwdc
             system_costs = costs['system_capex_per_kw'] * kw
 
         #loan.SystemCosts.om_production1_values = batt.Outputs.batt_annual_discharge_energy
