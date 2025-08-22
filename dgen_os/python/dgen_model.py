@@ -380,11 +380,9 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                         # You now have the exact state-level net hourly series
                         # Persist it here if you like (recommended): state_hourly_agg row
                         state_abbr = solar_agents.df["state_abbr"].iloc[0]
-                        scenario   = solar_agents.df["scenario"].iloc[0] if "scenario" in solar_agents.df else (scenario_settings.name or "unknown")
                         rec = pd.DataFrame([{
                             "run_id": RUN_ID,
                             "state_abbr": state_abbr,
-                            "scenario": scenario,
                             "year": year,
                             "n_hours": int(n_hours),
                             "net_sum": net_sum_state.tolist(),
