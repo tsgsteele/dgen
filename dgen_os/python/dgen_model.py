@@ -317,7 +317,7 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                             static_df.loc[chunk_ids],
                             scenario_settings.sectors,
                             rate_switch_table,
-                            "net"
+                            "simple"
                         )
                         for idx, chunk_ids in enumerate(chunks)
                     ]
@@ -363,32 +363,31 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                     pool.join()
 
                     # collect & combine
-                    got = [r.get() for r in results]           # list of (df_chunk, agg)
+                    got = [r.get() for r in results]  # list of (df_chunk, agg)
                     sized_chunks = [g[0] for g in got]
                     solar_agents.df = pd.concat(sized_chunks, axis=0)
 
-                    # --- NEW: combine per-chunk hourly sums into final state-year-scenario arrays ---
-                    agg_arrays = [g[1] for g in got if g[1].get("mode") == "net" and g[1].get("net_sum_kw")]
+                    # combine simple net sums (kW)
+                    agg_arrays = [g[1] for g in got if g[1].get("mode") == "simple" and g[1].get("net_sum_kw")]
                     if agg_arrays:
-                        n_hours = min(a["n_hours"] for a in agg_arrays if a["n_hours"]>0)
+                        n_hours = min(a["n_hours"] for a in agg_arrays if a["n_hours"] > 0)
                         net_sum_kw = np.zeros(n_hours, dtype=float)
                         for a in agg_arrays:
                             arr = np.asarray(a["net_sum_kw"], dtype=float)[:n_hours]
                             net_sum_kw += arr
 
-                        # Convert to MW for storage/metrics (optional)
-                        net_sum_mw = (net_sum_kw / 1000.0).tolist()
-
+                        # convert to MW and persist one array per state-year
                         state_abbr = solar_agents.df["state_abbr"].iloc[0]
-                        scenario   = solar_agents.df["scenario"].iloc[0] if "scenario" in solar_agents.df else (scenario_settings.name or "unknown")
+                        # scenario string optional; omit if you don't have it yet
                         rec = pd.DataFrame([{
                             "state_abbr": state_abbr,
                             "year": year,
                             "n_hours": int(n_hours),
-                            "net_sum": net_sum_mw,   # store in MW
+                            "net_sum": (net_sum_kw / 1000.0).tolist(),  # MW
                         }])
 
-                        iFuncs.df_to_psql(rec, engine, schema, owner, "state_hourly_agg", if_exists="append", append_transformations=False)
+                        iFuncs.df_to_psql(rec, engine, schema, owner, "state_hourly_agg",
+                                        if_exists="append", append_transformations=False)
 
                 # downstream: max market share, developable load, market last year, diffusion…
                 solar_agents.on_frame(financial_functions.calc_max_market_share, [max_market_share])

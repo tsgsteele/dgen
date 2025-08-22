@@ -277,7 +277,10 @@ def calc_system_performance(
 def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch_table=None):
     """
     Compute optimal system size (with/without battery) and attach outputs to agent row.
-    Stores a post-sizing net_hourly array (what the grid "sees") and omits pre-sizing generation_hourly.
+
+    Produces per-customer kW arrays for aggregation (this year only):
+      - baseline_net_hourly: pre-system load (for non-adopters this year)
+      - adopter_*_hourly: components and net for this year's new adopters
     """
     cur = con.cursor()
 
@@ -288,19 +291,19 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     # 1) Hourly load profile (pre-sizing)
     t0 = time.time()
     lp = agent_mutation.elec.get_and_apply_agent_load_profiles(con, agent)
-    cons = lp['consumption_hourly'].iloc[0]
+    cons = np.asarray(lp['consumption_hourly'].iloc[0], dtype=float)
     del lp
     load_profiles_total_time = time.time() - t0
 
-    # 2) Solar resource (per-kW). We need NAEP but we will NOT store generation_hourly.
+    # 2) Solar resource (per-kW). Keep NAEP for sizing; do not store generation_hourly.
     t0 = time.time()
     norm = agent_mutation.elec.get_and_apply_normalized_hourly_resource_solar(con, agent)
-    gen_per_kw = np.array(norm['solar_cf_profile'].iloc[0], dtype=float) / 1e6
-    agent.loc['naep'] = float(gen_per_kw.sum())  # keep NAEP for sizing
+    gen_per_kw = np.asarray(norm['solar_cf_profile'].iloc[0], dtype=float) / 1e6
+    agent.loc['naep'] = float(gen_per_kw.sum())
     del norm
     solar_resource_total_time = time.time() - t0
 
-    pv = {'consumption_hourly': cons, 'generation_hourly': gen_per_kw}  # used by calc_system_performance
+    pv = {'consumption_hourly': cons, 'generation_hourly': gen_per_kw}
 
     # 3) PySAM setup
     t_setup = time.time()
@@ -408,7 +411,7 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     gen_w_annual = float(np.sum(utilityrate.SystemOutput.gen))
     kw_w         = batt.BatterySystem.batt_power_charge_max_kwdc
     kwh_w        = batt.Outputs.batt_bank_installed_capacity
-    # capture hourly outputs for the "with batt" run
+
     load_w_ts    = np.asarray(utilityrate.Load.load, dtype=float)
     pv_w_ts      = np.asarray(utilityrate.SystemOutput.gen, dtype=float)
     btl_w_ts     = np.asarray(getattr(batt.Outputs, "batt_to_load", []), dtype=float)
@@ -425,11 +428,11 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     out_n_loan   = loan.Outputs.export()
     out_n_util   = utilityrate.Outputs.export()
     gen_n_annual = float(np.sum(utilityrate.SystemOutput.gen))
-    # capture hourly outputs for the "no batt" run
+
     load_n_ts    = np.asarray(utilityrate.Load.load, dtype=float)
     pv_n_ts      = np.asarray(utilityrate.SystemOutput.gen, dtype=float)
-    btl_n_ts     = np.asarray(getattr(batt.Outputs, "batt_to_load", []), dtype=float)  # usually empty
-    gtb_n_ts     = np.asarray(getattr(batt.Outputs, "grid_to_batt", []), dtype=float)  # usually empty
+    btl_n_ts     = np.asarray(getattr(batt.Outputs, "batt_to_load", []), dtype=float)
+    gtb_n_ts     = np.asarray(getattr(batt.Outputs, "grid_to_batt", []), dtype=float)
     npv_n        = out_n_loan['npv']
 
     optimize_time = time.time() - t_opt
@@ -486,14 +489,26 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     if first_without == 0:
         first_without = 1.0
 
-    # --- Compute and store the post-sizing net_hourly only ---
-    # If grid charging is allowed, include it in net (positive means charging increases net draw)
-    if gtb_ts.size:
-        net_ts = load_ts - pv_ts - btl_ts + gtb_ts
-    else:
-        net_ts = load_ts - pv_ts - btl_ts
+    # --- Build arrays for aggregation (per-customer kW) ---
+    # Baseline (pre-system) net = load
+    agent.loc['baseline_net_hourly'] = cons[:len(load_ts)].tolist()
 
-    agent.loc['net_hourly'] = net_ts.tolist()  # << the single array we keep for system aggregation
+    # Adopter components and net for this year
+    adopter_load_ts = load_ts
+    adopter_pv_ts   = pv_ts
+    adopter_btl_ts  = btl_ts
+    adopter_gtb_ts  = gtb_ts if gtb_ts.size else np.array([], dtype=float)
+
+    adopter_net_ts = adopter_load_ts - adopter_pv_ts - adopter_btl_ts
+    if adopter_gtb_ts.size:
+        adopter_gtb_ts = adopter_gtb_ts[:adopter_net_ts.size]
+        adopter_net_ts = adopter_net_ts + adopter_gtb_ts
+
+    agent.loc['adopter_load_hourly']        = adopter_load_ts.tolist()
+    agent.loc['adopter_pv_hourly']          = adopter_pv_ts.tolist()
+    agent.loc['adopter_batt_to_load_hourly']= adopter_btl_ts.tolist()
+    agent.loc['adopter_grid_to_batt_hourly']= adopter_gtb_ts.tolist() if adopter_gtb_ts.size else []
+    agent.loc['adopter_net_hourly']         = adopter_net_ts.tolist()
 
     # Scalars as before
     naep_final   = annual_kwh / max(system_kw, 1e-9)
@@ -521,6 +536,7 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     agent.loc['pbi']                                 = pbi
     agent.loc['cash_incentives']                     = ''
     agent.loc['export_tariff_results']               = ''
+    agent.loc['pv_per_kw_hourly'] = gen_per_kw.tolist()
 
     cur.close()
     return agent
@@ -902,11 +918,12 @@ def _init_worker(dsn, role):
     global _worker_conn
     _worker_conn, _ = utilfunc.make_con(dsn, role)
 
-def size_chunk(static_agents_df: pd.DataFrame, sectors, rate_switch_table, aggregate="net") -> Tuple[pd.DataFrame, dict]:
+def size_chunk(static_agents_df: pd.DataFrame, sectors, rate_switch_table, mode="simple"):
     """
-    Size a chunk of agents using `calc_system_size_and_performance`.
-    Returns (df_of_sized_agents, agg) where agg contains the hourly state sum (kW).
-    Scales each agent by `customers_in_bin`.
+    Simple aggregation:
+      net_sum_kw[h] = Σ_agents [ adopter_net_hourly[h] * number_of_adopters
+                                 + baseline_net_hourly[h] * (customers_in_bin - number_of_adopters) ]
+    Drops hourly arrays before returning df_chunk.
     """
     global _worker_conn
     results = []
@@ -919,40 +936,65 @@ def size_chunk(static_agents_df: pd.DataFrame, sectors, rate_switch_table, aggre
         agent.name = aid
 
         sized = calc_system_size_and_performance(
-            _worker_conn,
-            agent,
-            sectors,
-            rate_switch_table
+            _worker_conn, agent, sectors, rate_switch_table
         )
 
-        # Weight = customers represented by this agent
+        # Pull arrays (per-customer kW)
+        base = np.asarray(sized.get("baseline_net_hourly", []), dtype=float)
+        adop = np.asarray(sized.get("adopter_net_hourly",  []), dtype=float)
+
+        # Scalars
         try:
-            w = float(sized["customers_in_bin"])
-            if not np.isfinite(w) or w <= 0:
-                w = 1.0
+            n_cust = float(sized.get("customers_in_bin", 0.0))
         except Exception:
-            w = 1.0
+            n_cust = 0.0
+        try:
+            n_adopt = float(sized.get("number_of_adopters", 0.0))  # cumulative
+        except Exception:
+            n_adopt = 0.0
 
-        # Add this agent's net hourly (scaled by weight) to the running sum
-        arr = np.asarray(sized.get("net_hourly", []), dtype=float)
-        if arr.size:
+        n_non = max(n_cust - n_adopt, 0.0)
+
+        # Align and accumulate
+        if adop.size == 0 and base.size == 0:
+            pass
+        else:
+            m = adop.size if base.size == 0 else (base.size if adop.size == 0 else min(adop.size, base.size))
+            adop = adop[:m] if adop.size >= m else np.resize(adop, m)
+            base = base[:m] if base.size >= m else np.resize(base, m)
+
             if n_hours is None:
-                n_hours = arr.size
+                n_hours = m
                 net_sum = np.zeros(n_hours, dtype=float)
-            if arr.size != n_hours:
-                arr = arr[:min(n_hours, arr.size)]
-            net_sum[:arr.size] += w * arr
+            elif m != n_hours:
+                m = min(m, n_hours)
+                adop = adop[:m]; base = base[:m]
 
-        # Drop heavy per-hour arrays before returning to parent
-        for col in ("net_hourly", "consumption_hourly", "generation_hourly", "batt_dispatch_profile"):
-            if col in sized.index:
-                sized = sized.drop(labels=[col])
+            net_sum[:m] += adop[:m] * n_adopt + base[:m] * n_non
+
+        # Drop heavy arrays so they don't hit agent_outputs
+        drop_cols = (
+            "baseline_net_hourly",
+            "adopter_net_hourly",
+            "adopter_load_hourly",
+            "adopter_pv_hourly",
+            "adopter_batt_to_load_hourly",
+            "adopter_grid_to_batt_hourly",
+            "pv_per_kw_hourly",
+            "consumption_hourly",
+            "generation_hourly",
+            "batt_dispatch_profile",
+            "net_hourly",
+        )
+        for c in drop_cols:
+            if c in sized.index:
+                sized = sized.drop(labels=[c])
 
         results.append(sized)
 
     df_out = pd.DataFrame(results)
     agg = {
-        "mode": "net",
+        "mode": "simple",
         "n_hours": int(n_hours or 0),
         "net_sum_kw": (net_sum.tolist() if net_sum is not None else []),
     }
