@@ -381,7 +381,6 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                         # Persist it here if you like (recommended): state_hourly_agg row
                         state_abbr = solar_agents.df["state_abbr"].iloc[0]
                         rec = pd.DataFrame([{
-                            "run_id": RUN_ID,
                             "state_abbr": state_abbr,
                             "year": year,
                             "n_hours": int(n_hours),
