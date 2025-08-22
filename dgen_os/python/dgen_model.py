@@ -83,6 +83,14 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                 scenario_settings, con, cur, engine, model_settings,
                 agent_file_status, input_name='agent_file'
             )
+            # Subset to only single family and no renters
+            # solar_agents.df = (
+            #     solar_agents.df[
+            #         (solar_agents.df['owner_occupancy_status'] == 1) &
+            #         (solar_agents.df['crb_model'] != "Multi-Family with 5+ Units")
+
+            #     ]
+            # )
             cols_base = list(solar_agents.df.columns)
 
         if scenario_settings.techs == ['solar']:

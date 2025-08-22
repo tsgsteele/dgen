@@ -3,7 +3,11 @@ logsPolicy:
 
 taskGroups:
   - taskCount: "5"               # one task per state
+<<<<<<< HEAD
     parallelism: "2"             # run all states in parallel
+=======
+    parallelism: "1"             # run all states in parallel
+>>>>>>> hourly_export_time_series
     schedulingPolicy: AS_SOON_AS_POSSIBLE
 
     taskSpec:
@@ -71,4 +75,4 @@ taskGroups:
       computeResource:
         cpuMilli: 8000            # 8 vCPUs
         memoryMib: 16384           # 16 GiB
-        bootDiskMib: 100         # 100 mb boot disk
+        bootDiskMib: 100000         # 100 mb boot disk
