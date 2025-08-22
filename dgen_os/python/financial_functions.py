@@ -905,19 +905,14 @@ def _init_worker(dsn, role):
 def size_chunk(static_agents_df: pd.DataFrame, sectors, rate_switch_table, aggregate="net") -> Tuple[pd.DataFrame, dict]:
     """
     Size a chunk of agents using `calc_system_size_and_performance`.
-    Returns (df_of_sized_agents, agg) where agg contains small hourly arrays to sum at the parent.
-    `aggregate` in {"net", "components"}.
+    Returns (df_of_sized_agents, agg) where agg contains the hourly state sum (kW).
+    Scales each agent by `customers_in_bin`.
     """
     global _worker_conn
     results = []
 
-    n_agents = len(static_agents_df)
-    chunk_start = time.time()
-
-    # Small per-chunk accumulators (kept in worker only)
     n_hours = None
-    net_sum = None
-    load_sum = pv_sum = storage_sum = None
+    net_sum = None  # kW
 
     for aid, row in static_agents_df.iterrows():
         agent = row.copy()
@@ -930,71 +925,37 @@ def size_chunk(static_agents_df: pd.DataFrame, sectors, rate_switch_table, aggre
             rate_switch_table
         )
 
-        # --- Update per-chunk running sum(s) of net hourly load ---
-        if 'net_hourly' in sized.index and sized['net_hourly'] is not None:
-            arr = np.asarray(sized['net_hourly'], dtype=float)
+        # Weight = customers represented by this agent
+        try:
+            w = float(sized["customers_in_bin"])
+            if not np.isfinite(w) or w <= 0:
+                w = 1.0
+        except Exception:
+            w = 1.0
+
+        # Add this agent's net hourly (scaled by weight) to the running sum
+        arr = np.asarray(sized.get("net_hourly", []), dtype=float)
+        if arr.size:
             if n_hours is None:
                 n_hours = arr.size
                 net_sum = np.zeros(n_hours, dtype=float)
-            elif arr.size != n_hours:
-                # Align conservatively: truncate to min length
-                m = min(n_hours, arr.size)
-                arr = arr[:m]
-            net_sum[:arr.size] += arr
-        else:
-            # Fallback: use components already set on the agent
-            cons = np.asarray(sized.get('consumption_hourly', []), dtype=float)
-            gen  = np.asarray(sized.get('generation_hourly', []), dtype=float)
-            disp = np.asarray(sized.get('batt_dispatch_profile', []), dtype=float)
-            # Align lengths
-            if n_hours is None:
-                n_hours = max(cons.size, gen.size, disp.size)
-                cons = cons if cons.size==n_hours else np.resize(cons, n_hours)
-                gen  = gen  if gen.size==n_hours  else np.resize(gen,  n_hours)
-                if disp.size==0:
-                    disp = np.zeros(n_hours, dtype=float)
-                elif disp.size!=n_hours:
-                    disp = np.resize(disp, n_hours)
-                if aggregate == "net":
-                    net_sum = np.zeros(n_hours, dtype=float)
-                else:
-                    load_sum    = np.zeros(n_hours, dtype=float)
-                    pv_sum      = np.zeros(n_hours, dtype=float)
-                    storage_sum = np.zeros(n_hours, dtype=float)
-            else:
-                # Resize/truncate to n_hours
-                cons = cons[:n_hours] if cons.size>=n_hours else np.pad(cons, (0, n_hours-cons.size))
-                gen  = gen [:n_hours] if gen.size >=n_hours else np.pad(gen,  (0, n_hours-gen.size))
-                disp = disp[:n_hours] if disp.size>=n_hours else np.pad(disp, (0, n_hours-disp.size))
+            if arr.size != n_hours:
+                arr = arr[:min(n_hours, arr.size)]
+            net_sum[:arr.size] += w * arr
 
-            if aggregate == "net":
-                net_sum += (cons - gen - disp)
-            else:
-                load_sum    += cons
-                pv_sum      += gen
-                storage_sum += disp
-
-        # Drop heavy per-hour arrays before returning to parent (keeps memory/network light)
-        for col in ('consumption_hourly', 'generation_hourly', 'batt_dispatch_profile', 'net_hourly'):
+        # Drop heavy per-hour arrays before returning to parent
+        for col in ("net_hourly", "consumption_hourly", "generation_hourly", "batt_dispatch_profile"):
             if col in sized.index:
                 sized = sized.drop(labels=[col])
 
         results.append(sized)
 
     df_out = pd.DataFrame(results)
-
-    # Small agg payload for the parent
-    if aggregate == "net":
-        agg = {"mode": "net", "n_hours": int(n_hours or 0), "net_sum": (net_sum.tolist() if net_sum is not None else [])}
-    else:
-        agg = {
-            "mode": "components",
-            "n_hours": int(n_hours or 0),
-            "load_sum": (load_sum.tolist()    if load_sum    is not None else []),
-            "pv_sum":   (pv_sum.tolist()      if pv_sum      is not None else []),
-            "storage_sum": (storage_sum.tolist() if storage_sum is not None else []),
-        }
-
+    agg = {
+        "mode": "net",
+        "n_hours": int(n_hours or 0),
+        "net_sum_kw": (net_sum.tolist() if net_sum is not None else []),
+    }
     return df_out, agg
 
 
