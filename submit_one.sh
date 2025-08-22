@@ -11,6 +11,6 @@ JOB_NAME="dgen-large-states-${JOB_TS}"
 # submit the last job
 gcloud batch jobs submit "${JOB_NAME}" \
   --location="${LOCATION}" \
-  --config="batch_job_yamls/dgen-batch-job-large-states.yaml" \
+  --config="batch_job_yamls/dgen-batch-job-mid-states.yaml" \
   --machine-type="c2d-highcpu-56"  \
   --provisioning-model="SPOT"
