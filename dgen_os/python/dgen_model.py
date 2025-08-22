@@ -316,7 +316,8 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                         (
                             static_df.loc[chunk_ids],
                             scenario_settings.sectors,
-                            rate_switch_table
+                            rate_switch_table,
+                            "net"
                         )
                         for idx, chunk_ids in enumerate(chunks)
                     ]
@@ -329,11 +330,11 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                     processed_agents = manager.Value('i', 0)
                     lock             = manager.Lock()
 
-                    def on_done(df_chunk, idx):
+                    def on_done(result, idx):
                         """
-                        df_chunk: the sized DataFrame returned by size_chunk
-                        idx:      the chunk index
+                        result: (df_chunk, agg)
                         """
+                        df_chunk, agg = result
                         elapsed = time.time() - chunk_start[idx]
                         with lock:
                             completed_chunks.value += 1
@@ -347,27 +348,50 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                             f"{processed_agents.value}/{total_agents} ({pct:.0%})",
                             flush=True
                         )
-                        return df_chunk
+                        # return the result intact so parent can collect both df and agg
+                        return (df_chunk, agg)
 
-                    # dispatch each chunk asynchronously
-                    chunk_start = {}
+                    # dispatch
                     results = []
+                    chunk_start = {}
                     for idx, args in enumerate(tasks):
                         chunk_start[idx] = time.time()
-                        # note: callback gets the df_chunk first, then idx via partial
-                        res = pool.apply_async(
-                            size_chunk,
-                            args=args,
-                            callback=partial(on_done, idx=idx)
-                        )
+                        res = pool.apply_async(size_chunk, args=args, callback=partial(on_done, idx=idx))
                         results.append(res)
 
                     pool.close()
                     pool.join()
 
-                    # collect results and re‐assemble into one DataFrame
-                    sized_chunks = [r.get() for r in results]
+                    # collect & combine
+                    got = [r.get() for r in results]           # list of (df_chunk, agg)
+                    sized_chunks = [g[0] for g in got]
                     solar_agents.df = pd.concat(sized_chunks, axis=0)
+
+                    # --- NEW: combine per-chunk hourly sums into final state-year-scenario arrays ---
+                    # We’re summing net only (simple, cheap)
+                    agg_arrays = [g[1] for g in got if g[1].get("mode") == "net" and g[1].get("net_sum")]
+                    if agg_arrays:
+                        n_hours = min(a["n_hours"] for a in agg_arrays if a["n_hours"]>0)
+                        net_sum_state = np.zeros(n_hours, dtype=float)
+                        for a in agg_arrays:
+                            arr = np.asarray(a["net_sum"], dtype=float)[:n_hours]
+                            net_sum_state += arr
+
+                        # You now have the exact state-level net hourly series
+                        # Persist it here if you like (recommended): state_hourly_agg row
+                        state_abbr = solar_agents.df["state_abbr"].iloc[0]
+                        scenario   = solar_agents.df["scenario"].iloc[0] if "scenario" in solar_agents.df else (scenario_settings.name or "unknown")
+                        rec = pd.DataFrame([{
+                            "run_id": RUN_ID,
+                            "state_abbr": state_abbr,
+                            "scenario": scenario,
+                            "year": year,
+                            "n_hours": int(n_hours),
+                            "net_sum": net_sum_state.tolist(),
+                        }])
+
+                        # Ensure table exists and column type is DOUBLE PRECISION[] (writer you patched will do that)
+                        iFuncs.df_to_psql(rec, engine, schema, owner, "state_hourly_agg", if_exists="append", append_transformations=False)
 
 
                 # downstream: max market share, developable load, market last year, diffusion…
