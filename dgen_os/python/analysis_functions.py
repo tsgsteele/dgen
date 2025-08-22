@@ -58,24 +58,23 @@ def discover_state_dirs(root_dir: str) -> List[str]:
     )
 
 
-def find_state_files(state_dir: str, run_id: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
+def find_state_files(state_dir: str, run_id: Optional[str] = None, strict_run_id: bool = True) -> Tuple[Optional[str], Optional[str]]:
     """
     Locate per-state CSVs for baseline and policy.
 
-    Search order:
-      1) baseline_{run_id}.csv / policy_{run_id}.csv (if run_id is provided)
-      2) any baseline*.csv / policy*.csv
-
-    Returns:
-        (baseline_csv_path or None, policy_csv_path or None)
+    If run_id is provided and strict_run_id=True (default), return only files that match
+    baseline_{run_id}.csv and policy_{run_id}.csv; otherwise return (None, None) for missing.
+    If strict_run_id=False, falls back to any baseline*/policy* when both exact matches are absent.
     """
     if run_id:
         b = glob.glob(os.path.join(state_dir, f"baseline_{run_id}.csv"))
         p = glob.glob(os.path.join(state_dir, f"policy_{run_id}.csv"))
+        if strict_run_id:
+            return (b[0] if b else None), (p[0] if p else None)
         if b and p:
             return b[0], p[0]
 
-    # Fallback: any baseline*/policy* file
+    # Fallback (only used when strict_run_id=False or no run_id provided)
     b = glob.glob(os.path.join(state_dir, "baseline*.csv"))
     p = glob.glob(os.path.join(state_dir, "policy*.csv"))
     return (b[0] if b else None), (p[0] if p else None)
@@ -85,13 +84,23 @@ def _read_with_selected_cols(path: str) -> pd.DataFrame:
     """
     Read a CSV keeping only columns present from NEEDED_COLS; missing columns are added.
     If `scenario` or `state_abbr` is missing, they are inferred from file and directory names.
+    Robust to empty/zero-byte CSVs.
     """
-    if not path or not os.path.exists(path):
+    if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
         return pd.DataFrame(columns=NEEDED_COLS)
 
-    header = pd.read_csv(path, nrows=0)
+    try:
+        header = pd.read_csv(path, nrows=0)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame(columns=NEEDED_COLS)
+
     present = [c for c in NEEDED_COLS if c in header.columns]
-    df = pd.read_csv(path, usecols=present)
+
+    try:
+        df = pd.read_csv(path, usecols=present) if present else pd.DataFrame(columns=NEEDED_COLS)
+    except (pd.errors.EmptyDataError, ValueError):
+        # ValueError can occur if usecols don’t match due to malformed header
+        return pd.DataFrame(columns=NEEDED_COLS)
 
     # Add missing columns
     for c in NEEDED_COLS:
@@ -391,12 +400,29 @@ def process_all_states(
     root_dir: str,
     run_id: Optional[str] = None,
     cfg: SavingsConfig = SavingsConfig(),
-    n_jobs: int = 1
+    n_jobs: int = 1,
+    states: Optional[Iterable[str]] = None,   # <— NEW: optional state filter
 ) -> Dict[str, pd.DataFrame]:
     """
     Aggregate small, plot-ready DataFrames across all states.
+
+    Args:
+        root_dir: Root folder containing per-state subdirectories (e.g., 'CA', 'ny', ...).
+        run_id: If provided, only pick baseline_{run_id}.csv / policy_{run_id}.csv.
+        cfg: SavingsConfig for savings computations.
+        n_jobs: Parallel workers (processes).
+        states: Optional iterable of 2-letter state codes to include (case-insensitive).
     """
     state_dirs = discover_state_dirs(root_dir)
+
+    # Optional filter by explicit state codes (case-insensitive)
+    if states:
+        wanted = {s.strip().upper() for s in states if s and s.strip()}
+        state_dirs = [
+            sd for sd in state_dirs
+            if os.path.basename(sd).upper() in wanted
+        ]
+
     if not state_dirs:
         return {
             "median_system_kw": pd.DataFrame(),
