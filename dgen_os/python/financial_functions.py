@@ -154,8 +154,8 @@ def calc_system_performance(
         configure_retail_rate_dispatch(
             batt,
             allow_export=True,
-            allow_grid_charge=True,
-            charge_only_when_surplus=False,
+            allow_grid_charge=False,
+            charge_only_when_surplus=True,
             lookahead_hours=24,
         )
         if not hasattr(batt.BatteryDispatch, 'batt_look_ahead_hours'):
@@ -391,7 +391,7 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     tol        = min(0.25 * max_system, 0.25)
     batt_disp  = 'peak_shaving' if agent.loc['sector_abbr'] != 'res' else 'price_signal_forecast'
     low        = max_system * 0.8
-    high       = max_system * 1.5
+    high       = max_system * 1.25
 
     def perf_with_batt(x):
         return calc_system_performance(
@@ -412,15 +412,19 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     )
     out_w_loan = loan.Outputs.export()
     out_w_util = utilityrate.Outputs.export()
-    gen_w_annual = float(np.sum(utilityrate.SystemOutput.gen))
-    kw_w         = batt.BatterySystem.batt_power_discharge_max_kwdc
-    kwh_w        = batt.Outputs.batt_bank_installed_capacity
+    gen_w_annual = float(np.nansum(np.asarray(getattr(utilityrate.SystemOutput, "gen", []), dtype=float)))
+    kw_w         = getattr(batt.BatterySystem, "batt_power_discharge_max_kwdc", 0.0)
+    kwh_w        = getattr(batt.Outputs, "batt_bank_installed_capacity", 0.0)
 
-    load_w_ts    = np.asarray(utilityrate.Load.load, dtype=float)
-    pv_w_ts      = np.asarray(utilityrate.SystemOutput.gen, dtype=float)
-    btl_w_ts     = np.asarray(getattr(batt.Outputs, "batt_to_load", []), dtype=float)
-    gtb_w_ts     = np.asarray(getattr(batt.Outputs, "grid_to_batt", []), dtype=float)
-    npv_w        = out_w_loan['npv']
+    load_w_ts = np.asarray(getattr(utilityrate.Load, "load", []), dtype=float)
+    # Prefer PV->load; fallback to PV generation; clip to load to avoid negatives
+    _pv_w_raw = getattr(utilityrate.Outputs, "year1_hourly_system_to_load", None)
+    if _pv_w_raw is None or (hasattr(_pv_w_raw, "__len__") and len(_pv_w_raw) == 0):
+        _pv_w_raw = getattr(utilityrate.SystemOutput, "gen", [])
+    pv_w_ts  = np.asarray(_pv_w_raw, dtype=float)
+    btl_w_ts = np.asarray(getattr(batt.Outputs, "batt_to_load", []), dtype=float)
+    gtb_w_ts = np.asarray(getattr(batt.Outputs, "grid_to_batt", []), dtype=float)
+    npv_w    = out_w_loan.get("npv", float("-inf"))
 
     # --- Run without battery, capture arrays ---
     res_n = optimize.minimize_scalar(
@@ -431,13 +435,14 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     )
     out_n_loan   = loan.Outputs.export()
     out_n_util   = utilityrate.Outputs.export()
-    gen_n_annual = float(np.sum(utilityrate.SystemOutput.gen))
+    gen_n_annual = float(np.nansum(np.asarray(getattr(utilityrate.SystemOutput, "gen", []), dtype=float)))
 
-    load_n_ts    = np.asarray(utilityrate.Load.load, dtype=float)
-    pv_n_ts      = np.asarray(utilityrate.SystemOutput.gen, dtype=float)
-    btl_n_ts     = np.asarray(getattr(batt.Outputs, "batt_to_load", []), dtype=float)
-    gtb_n_ts     = np.asarray(getattr(batt.Outputs, "grid_to_batt", []), dtype=float)
-    npv_n        = out_n_loan['npv']
+    load_n_ts = np.asarray(getattr(utilityrate.Load, "load", []), dtype=float)
+    _pv_n_raw = getattr(utilityrate.Outputs, "year1_hourly_system_to_load", None)
+    if _pv_n_raw is None or (hasattr(_pv_n_raw, "__len__") and len(_pv_n_raw) == 0):
+        _pv_n_raw = getattr(utilityrate.SystemOutput, "gen", [])
+    pv_n_ts  = np.asarray(_pv_n_raw, dtype=float)
+    npv_n    = out_n_loan.get("npv", float("-inf"))
 
     optimize_time = time.time() - t_opt
 
@@ -460,59 +465,56 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
         # with battery wins
         system_kw     = float(res_w.x)
         annual_kwh    = gen_w_annual
-        first_with    = out_w_util['utility_bill_w_sys_year1']
-        first_without = out_w_util['utility_bill_wo_sys_year1']
+        first_with    = out_w_util.get('utility_bill_w_sys_year1', 0.0)
+        first_without = out_w_util.get('utility_bill_wo_sys_year1', 0.0)
         npv_final     = npv_w
-        cash_flow     = list(out_w_loan['cf_payback_with_expenses'])
-        payback       = out_w_loan['payback']
+        cash_flow     = list(out_w_loan.get('cf_payback_with_expenses', []))
+        payback       = out_w_loan.get('payback', None)
         batt_kw       = kw_w
         batt_kwh      = kwh_w
-        cbi           = out_w_loan['cbi_total']
-        ibi           = out_w_loan['ibi_total']
-        pbi           = out_w_loan['cf_pbi_total']
+        cbi           = out_w_loan.get('cbi_total', 0.0)
+        ibi           = out_w_loan.get('ibi_total', 0.0)
+        pbi           = out_w_loan.get('cf_pbi_total', 0.0)
 
-        load_ts, pv_ts, btl_ts, gtb_ts = _align_to_n(load_w_ts, pv_w_ts, btl_w_ts, gtb_w_ts)
+        load_ts, pv_ts = _align_to_n(load_w_ts, pv_w_ts)
     else:
         # no battery wins
         system_kw     = float(res_n.x)
         annual_kwh    = gen_n_annual
-        first_with    = out_n_util['utility_bill_w_sys_year1']
-        first_without = out_n_util['utility_bill_wo_sys_year1']
+        first_with    = out_n_util.get('utility_bill_w_sys_year1', 0.0)
+        first_without = out_n_util.get('utility_bill_wo_sys_year1', 0.0)
         npv_final     = npv_n
-        cash_flow     = list(out_n_loan['cf_payback_with_expenses'])
-        payback       = out_n_loan['payback']
+        cash_flow     = list(out_n_loan.get('cf_payback_with_expenses', []))
+        payback       = out_n_loan.get('payback', None)
         batt_kw       = 0.0
         batt_kwh      = 0.0
-        cbi           = out_n_loan['cbi_total']
-        ibi           = out_n_loan['ibi_total']
-        pbi           = out_n_loan['cf_pbi_total']
+        cbi           = out_n_loan.get('cbi_total', 0.0)
+        ibi           = out_n_loan.get('ibi_total', 0.0)
+        pbi           = out_n_loan.get('cf_pbi_total', 0.0)
 
-        load_ts, pv_ts, btl_ts, gtb_ts = _align_to_n(load_n_ts, pv_n_ts, btl_n_ts, gtb_n_ts)
+        load_ts, pv_ts = _align_to_n(load_n_ts, pv_n_ts)
 
     # Guard against div/0 in savings % below
-    if first_without == 0:
+    if not first_without or first_without == 0:
         first_without = 1.0
 
     # --- Build arrays for aggregation (per-customer kW) ---
-    # Baseline (pre-system) net = load
-    agent.loc['baseline_net_hourly'] = cons[:len(load_ts)].tolist()
+    # Baseline (pre-system) net = load (fallback to load_ts if 'cons' missing)
+    try:
+        _cons_arr = np.asarray(cons, dtype=float)
+    except Exception:
+        _cons_arr = load_ts
+    agent.loc['baseline_net_hourly'] = _cons_arr[:load_ts.size].tolist()
 
-    # Adopter components and net for this year
+    # Adopter components and net for this year (clip to avoid negative net / exports)
     adopter_load_ts = load_ts
     adopter_pv_ts   = pv_ts
-    adopter_btl_ts  = btl_ts
-    adopter_gtb_ts  = gtb_ts if gtb_ts.size else np.array([], dtype=float)
+    adopter_net_ts  = np.maximum(adopter_load_ts - adopter_pv_ts, 0.0)
 
-    adopter_net_ts = adopter_load_ts - adopter_pv_ts - adopter_btl_ts
-    if adopter_gtb_ts.size:
-        adopter_gtb_ts = adopter_gtb_ts[:adopter_net_ts.size]
-        adopter_net_ts = adopter_net_ts + adopter_gtb_ts
+    agent.loc['adopter_load_hourly'] = adopter_load_ts.tolist()
+    agent.loc['adopter_pv_hourly']   = adopter_pv_ts.tolist()
+    agent.loc['adopter_net_hourly']  = adopter_net_ts.tolist()
 
-    agent.loc['adopter_load_hourly']        = adopter_load_ts.tolist()
-    agent.loc['adopter_pv_hourly']          = adopter_pv_ts.tolist()
-    agent.loc['adopter_batt_to_load_hourly']= adopter_btl_ts.tolist()
-    agent.loc['adopter_grid_to_batt_hourly']= adopter_gtb_ts.tolist() if adopter_gtb_ts.size else []
-    agent.loc['adopter_net_hourly']         = adopter_net_ts.tolist()
 
     # Scalars as before
     naep_final   = annual_kwh / max(system_kw, 1e-9)
