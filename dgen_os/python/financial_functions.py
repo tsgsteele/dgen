@@ -1168,7 +1168,7 @@ def size_chunk(static_agents_df: pd.DataFrame, sectors, rate_switch_table, mode=
         # Drop heavy arrays so they don't hit agent_outputs
         drop_cols = (
             "baseline_net_hourly",
-            "adopter_net_hourly",
+            "adopter_net_hourly",                # <-- REMOVE this line
             "adopter_load_hourly",
             "adopter_pv_hourly",
             "adopter_batt_to_load_hourly",
@@ -1179,6 +1179,8 @@ def size_chunk(static_agents_df: pd.DataFrame, sectors, rate_switch_table, mode=
             "batt_dispatch_profile",
             "net_hourly",
         )
+        # keep baseline/adopter net so we can aggregate *after* diffusion
+        drop_cols = tuple(c for c in drop_cols if c not in ("baseline_net_hourly","adopter_net_hourly"))
         for c in drop_cols:
             if c in sized.index:
                 sized = sized.drop(labels=[c])

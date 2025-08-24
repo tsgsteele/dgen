@@ -367,27 +367,6 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                     sized_chunks = [g[0] for g in got]
                     solar_agents.df = pd.concat(sized_chunks, axis=0)
 
-                    # combine simple net sums (kW)
-                    agg_arrays = [g[1] for g in got if g[1].get("mode") == "simple" and g[1].get("net_sum_kw")]
-                    if agg_arrays:
-                        n_hours = min(a["n_hours"] for a in agg_arrays if a["n_hours"] > 0)
-                        net_sum_kw = np.zeros(n_hours, dtype=float)
-                        for a in agg_arrays:
-                            arr = np.asarray(a["net_sum_kw"], dtype=float)[:n_hours]
-                            net_sum_kw += arr
-
-                        # convert to MW and persist one array per state-year
-                        state_abbr = solar_agents.df["state_abbr"].iloc[0]
-                        # scenario string optional; omit if you don't have it yet
-                        rec = pd.DataFrame([{
-                            "state_abbr": state_abbr,
-                            "year": year,
-                            "n_hours": int(n_hours),
-                            "net_sum": (net_sum_kw / 1000.0).tolist(),  # MW
-                        }])
-
-                        iFuncs.df_to_psql(rec, engine, schema, owner, "state_hourly_agg",
-                                        if_exists="append", append_transformations=False)
 
                 # downstream: max market share, developable load, market last year, diffusion…
                 solar_agents.on_frame(financial_functions.calc_max_market_share, [max_market_share])
@@ -404,6 +383,45 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                 solar_agents.df, market_last_year_df = diffusion_functions_elec.calc_diffusion_solar(
                     solar_agents.df, is_first_year, bass_params, year
                 )
+
+                # Exporting state-level net hourly load
+                if {"baseline_net_hourly", "adopter_net_hourly"}.issubset(solar_agents.df.columns):
+                    # Find a consistent hour length across rows
+                    def _len_safe(x):
+                        try: return len(x)
+                        except Exception: return 0
+                    n_hours = int(min(
+                        solar_agents.df["baseline_net_hourly"].map(_len_safe).replace(0, np.nan).min(),
+                        solar_agents.df["adopter_net_hourly"].map(_len_safe).replace(0, np.nan).min()
+                    ))
+                    if np.isfinite(n_hours) and n_hours > 0:
+                        def _arr(a):
+                            a = np.asarray(a, dtype=float)
+                            if a.size >= n_hours: return a[:n_hours]
+                            return np.pad(a, (0, n_hours - a.size))
+                        net_sum_kw = np.zeros(n_hours, dtype=float)
+                        for _, r in solar_agents.df.iterrows():
+                            base = _arr(r["baseline_net_hourly"])
+                            adop = _arr(r["adopter_net_hourly"])
+                            n_cust  = float(r.get("customers_in_bin", 0.0))
+                            # IMPORTANT: use *cumulative* adopters after diffusion for this year
+                            n_adopt = float(r.get("number_of_adopters", 0.0))
+                            n_non   = max(n_cust - n_adopt, 0.0)
+                            net_sum_kw += adop * n_adopt + base * n_non
+
+                        # Convert to MW and persist one array per state-year
+                        state_abbr = solar_agents.df["state_abbr"].iloc[0]
+                        rec = pd.DataFrame([{
+                            "state_abbr": state_abbr,
+                            "year": year,
+                            "n_hours": int(n_hours),
+                            "net_sum": (net_sum_kw / 1000.0).tolist(),  # MW
+                        }])
+                        iFuncs.df_to_psql(
+                            rec, engine, schema, owner, "state_hourly_agg",
+                            if_exists="append", append_transformations=False
+                        )
+
                 solar_agents.on_frame(agent_mutation.elec.estimate_total_generation)
 
                 last_year_installed_capacity = solar_agents.df[['state_abbr','system_kw_cum','batt_kw_cum','batt_kwh_cum','year']].copy()
