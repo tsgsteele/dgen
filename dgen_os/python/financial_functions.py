@@ -35,7 +35,7 @@ import PySAM.Pvwattsv8 as pvwattsv8
 SKIP_DEMAND_CHARGES = True
 
 # Force net billing
-FORCE_NET_BILLING = True
+FORCE_NET_BILLING = False
 
 #==============================================================================
 # Logger
