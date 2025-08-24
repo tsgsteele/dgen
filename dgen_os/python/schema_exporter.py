@@ -92,7 +92,8 @@ def export_one_schema(
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """
     Stream-export ONLY selected columns from "{schema}.agent_outputs", explicitly excluding
-    the huge text columns that contain hourly arrays/lists.
+    the huge text columns that contain hourly arrays/lists. Also exports per-year state-hourly
+    aggregates to a scenario-specific file: hourly_<scenario>_<run_id>.csv.
     """
     from psycopg2 import sql as _sql
 
@@ -111,55 +112,102 @@ def export_one_schema(
 
     per_state_dir = os.path.join(out_dir, state)
     _ensure_dir(per_state_dir)
+
+    # ---------- Agent outputs export ----------
     out_csv = os.path.join(per_state_dir, f"{scenario}_{run_id}.csv")
-
     if not overwrite and os.path.exists(out_csv) and os.path.getsize(out_csv) > 0:
-        return (schema_name, None, None)
-
-    try:
-        with _connect(cp) as conn, conn.cursor() as cur:
-            meta_sql = """
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_schema = %s AND table_name = %s
-                ORDER BY ordinal_position
-            """
-            cols_df = pd.read_sql(meta_sql, conn, params=(schema_name, "agent_outputs"))
-            all_cols = [r["column_name"] for _, r in cols_df.iterrows()]
-
-            selected_cols = [c for c in all_cols if c not in EXCLUDE_COLS and not exclude_re.search(c)]
-            if not selected_cols:
-                return (schema_name, None, f"No columns left after exclusion for {schema_name}.agent_outputs")
-
-            col_list_sql = _sql.SQL(", ").join([_sql.SQL("a.{}").format(_sql.Identifier(c)) for c in selected_cols])
-
-            copy_stmt = _sql.SQL(
+        agent_done = True
+    else:
+        agent_done = False
+        try:
+            with _connect(cp) as conn, conn.cursor() as cur:
+                meta_sql = """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = %s AND table_name = %s
+                    ORDER BY ordinal_position
                 """
-                COPY (
-                  SELECT
-                    {col_list},
-                    {scen} AS "scenario",
-                    {sch}  AS "schema",
-                    {st}   AS "state_abbr"
-                  FROM {schema}.{table} AS a
-                ) TO STDOUT WITH CSV HEADER
-                """
-            ).format(
-                col_list=col_list_sql,
-                scen=_sql.Literal(scenario),
-                sch=_sql.Literal(schema_name),
-                st=_sql.Literal(state.upper()),
-                schema=_sql.Identifier(schema_name),
-                table=_sql.Identifier("agent_outputs"),
-            )
+                cols_df = pd.read_sql(meta_sql, conn, params=(schema_name, "agent_outputs"))
+                all_cols = [r["column_name"] for _, r in cols_df.iterrows()]
 
-            with open(out_csv, "w", newline="") as f:
-                cur.copy_expert(copy_stmt.as_string(conn), f)
+                selected_cols = [c for c in all_cols if c not in EXCLUDE_COLS and not exclude_re.search(c)]
+                if not selected_cols:
+                    return (schema_name, None, f"No columns left after exclusion for {schema_name}.agent_outputs")
 
-        return (schema_name, out_csv, None)
+                col_list_sql = _sql.SQL(", ").join([_sql.SQL("a.{}").format(_sql.Identifier(c)) for c in selected_cols])
 
-    except Exception as e:
-        return (schema_name, None, f"{type(e).__name__}: {e}")
+                copy_stmt = _sql.SQL(
+                    """
+                    COPY (
+                      SELECT
+                        {col_list},
+                        {scen} AS "scenario",
+                        {sch}  AS "schema",
+                        {st}   AS "state_abbr"
+                      FROM {schema}.{table} AS a
+                    ) TO STDOUT WITH CSV HEADER
+                    """
+                ).format(
+                    col_list=col_list_sql,
+                    scen=_sql.Literal(scenario),
+                    sch=_sql.Literal(schema_name),
+                    st=_sql.Literal(state.upper()),
+                    schema=_sql.Identifier(schema_name),
+                    table=_sql.Identifier("agent_outputs"),
+                )
+
+                with open(out_csv, "w", newline="") as f:
+                    cur.copy_expert(copy_stmt.as_string(conn), f)
+
+            agent_done = True
+        except Exception as e:
+            return (schema_name, None, f"{type(e).__name__}: {e}")
+
+    # ---------- Hourly export (scenario-specific file) ----------
+    # Avoid parallel clobbering by writing separate files per scenario.
+    hourly_csv = os.path.join(per_state_dir, f"hourly_{scenario}_{run_id}.csv")
+    if overwrite or not (os.path.exists(hourly_csv) and os.path.getsize(hourly_csv) > 0):
+        try:
+            with _connect(cp) as conn2, conn2.cursor() as cur2:
+                # Only export if the table exists
+                cur2.execute(
+                    """
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema = %s AND table_name = 'state_hourly_agg'
+                    LIMIT 1
+                    """,
+                    (schema_name,),
+                )
+                exists = cur2.fetchone() is not None
+                if exists:
+                    copy_hourly = _sql.SQL(
+                        """
+                        COPY (
+                          SELECT
+                            {scen} AS "scenario",
+                            {sch}  AS "schema",
+                            {st}   AS "state_abbr",
+                            a.year,
+                            a.n_hours,
+                            a.net_sum::text AS net_sum_text
+                          FROM {schema}.state_hourly_agg AS a
+                          ORDER BY a.year
+                        ) TO STDOUT WITH CSV HEADER
+                        """
+                    ).format(
+                        scen=_sql.Literal(scenario),
+                        sch=_sql.Literal(schema_name),
+                        st=_sql.Literal(state.upper()),
+                        schema=_sql.Identifier(schema_name),
+                    )
+                    with open(hourly_csv, "w", newline="") as f2:
+                        cur2.copy_expert(copy_hourly.as_string(conn2), f2)
+        except Exception:
+            # Don't fail the whole export if hourly isn't present or errors out
+            pass
+
+    return (schema_name, out_csv if agent_done else None, None)
 
 
 def combine_two_csvs(

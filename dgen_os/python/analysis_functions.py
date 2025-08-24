@@ -46,6 +46,232 @@ NEEDED_COLS = [
 SCHEMA_RE = re.compile(r"^diffusion_results_(baseline|policy)_([a-z]{2})_", re.IGNORECASE)
 
 
+
+# ============================
+# Hourly → Peak helpers
+# ============================
+
+import json
+
+def _parse_array_text_to_floats(s: str) -> list[float]:
+    """
+    Accept Postgres array text like '{1,2,3}' or JSON-like '[1,2,3]' and return [1.0, 2.0, 3.0].
+    Returns [] on any parse issue.
+    """
+    if not isinstance(s, str) or not s:
+        return []
+    t = s.strip()
+    try_json = t.replace("{", "[").replace("}", "]")
+    try:
+        vals = json.loads(try_json)
+        return [float(v) for v in vals] if isinstance(vals, list) else []
+    except Exception:
+        # Fallback: naive split on commas inside braces
+        if t.startswith("{") and t.endswith("}"):
+            inner = t[1:-1]
+            if not inner:
+                return []
+            parts = inner.split(",")
+            out = []
+            for p in parts:
+                p = p.strip()
+                try:
+                    out.append(float(p))
+                except Exception:
+                    return []
+            return out
+    return []
+
+
+def find_state_hourly_files(state_dir: str, run_id: Optional[str] = None) -> List[str]:
+    import glob, os
+    paths: List[str] = []
+    if run_id:
+        paths += glob.glob(os.path.join(state_dir, f"hourly_baseline_{run_id}.csv"))
+        paths += glob.glob(os.path.join(state_dir, f"hourly_policy_{run_id}.csv"))
+        if not paths:
+            # legacy single-file fallback
+            paths += glob.glob(os.path.join(state_dir, f"hourly_{run_id}.csv"))
+    else:
+        paths += glob.glob(os.path.join(state_dir, "hourly_baseline*.csv"))
+        paths += glob.glob(os.path.join(state_dir, "hourly_policy*.csv"))
+        if not paths:
+            paths += glob.glob(os.path.join(state_dir, "hourly*.csv"))
+    # de-dup while preserving order
+    seen, out = set(), []
+    for p in paths:
+        if p not in seen:
+            seen.add(p); out.append(p)
+    return out
+
+def load_state_peaks_df(state_dir: str, run_id: Optional[str] = None) -> pd.DataFrame:
+    paths = find_state_hourly_files(state_dir, run_id)
+    if not paths:
+        return pd.DataFrame(columns=["state_abbr","scenario","year","peak_mw"])
+
+    frames: List[pd.DataFrame] = []
+    for path in paths:
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            continue
+        try:
+            df = pd.read_csv(path)
+        except pd.errors.EmptyDataError:
+            continue
+
+        # ensure required cols & infer scenario if missing (from filename)
+        if "scenario" not in df.columns:
+            fname = os.path.basename(path).lower()
+            df["scenario"] = "policy" if "policy" in fname else ("baseline" if "baseline" in fname else np.nan)
+        if "state_abbr" not in df.columns:
+            df["state_abbr"] = os.path.basename(os.path.dirname(path)).upper()
+        if not {"state_abbr","scenario","year","net_sum_text"}.issubset(df.columns):
+            continue
+
+        def _peak(row) -> float:
+            arr = _parse_array_text_to_floats(str(row.get("net_sum_text","")))
+            return float(np.max(arr)) if arr else np.nan
+
+        d = df.copy()
+        d["peak_mw"] = d.apply(_peak, axis=1)
+        d = d[["state_abbr","scenario","year","peak_mw"]].dropna(subset=["peak_mw"])
+        d["year"] = pd.to_numeric(d["year"], errors="coerce")
+        d = d.dropna(subset=["year"])
+        frames.append(d)
+
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["state_abbr","scenario","year","peak_mw"])
+
+
+def load_state_peaks_df(state_dir: str, run_id: str | None = None) -> pd.DataFrame:
+    """
+    Read one state's hourly CSV(s) and compute peak demand (MW) per year, by scenario.
+    Supports scenario-specific files (hourly_baseline_* / hourly_policy_*) and the legacy single-file style.
+    Returns columns: ['state_abbr','scenario','year','peak_mw'].
+    """
+    paths = find_state_hourly_files(state_dir, run_id)  # may return 0, 1, or 2 files
+    if not paths:
+        return pd.DataFrame(columns=["state_abbr", "scenario", "year", "peak_mw"])
+
+    frames: List[pd.DataFrame] = []
+    for path in paths:
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            continue
+        try:
+            df = pd.read_csv(path)
+        except pd.errors.EmptyDataError:
+            continue
+
+        # Ensure required cols, infer if missing
+        if "scenario" not in df.columns:
+            fname = os.path.basename(path).lower()
+            df["scenario"] = "policy" if "policy" in fname else ("baseline" if "baseline" in fname else np.nan)
+        if "state_abbr" not in df.columns:
+            df["state_abbr"] = os.path.basename(os.path.dirname(path)).upper()
+
+        needed = {"state_abbr", "scenario", "year", "net_sum_text"}
+        if not needed.issubset(df.columns):
+            continue
+
+        def _peak(row) -> float:
+            arr = _parse_array_text_to_floats(str(row.get("net_sum_text", "")))
+            return float(np.max(arr)) if arr else np.nan
+
+        d = df.copy()
+        d["peak_mw"] = d.apply(_peak, axis=1)
+        d = d[["state_abbr", "scenario", "year", "peak_mw"]].dropna(subset=["peak_mw"])
+        d["year"] = pd.to_numeric(d["year"], errors="coerce")
+        d = d.dropna(subset=["year"]).reset_index(drop=True)
+        frames.append(d)
+
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["state_abbr", "scenario", "year", "peak_mw"])
+
+
+def process_all_states_peaks(
+    root_dir: str,
+    run_id: str | None = None,
+    n_jobs: int = 1,
+    states: Iterable[str] | None = None,
+) -> pd.DataFrame:
+    """
+    Aggregate peak demand (MW) per year for all requested states.
+    Returns tidy DF: ['state_abbr','scenario','year','peak_mw'].
+    """
+    state_dirs = discover_state_dirs(root_dir)
+    if states:
+        wanted = {s.strip().upper() for s in states if s and s.strip()}
+        state_dirs = [sd for sd in state_dirs if os.path.basename(sd).upper() in wanted]
+    if not state_dirs:
+        return pd.DataFrame(columns=["state_abbr","scenario","year","peak_mw"])
+
+    tasks = [(sd, run_id) for sd in state_dirs]
+    results: list[pd.DataFrame] = []
+    n_jobs = max(1, min(n_jobs, max(1, (cpu_count() or 2) - 1)))
+    if n_jobs == 1:
+        results = [load_state_peaks_df(sd, run_id) for sd, run_id in tasks]
+    else:
+        with Pool(processes=n_jobs) as pool:
+            for df in pool.starmap(load_state_peaks_df, tasks):
+                results.append(df)
+    return pd.concat(results, ignore_index=True) if results else pd.DataFrame(columns=["state_abbr","scenario","year","peak_mw"])
+
+
+def facet_peaks_by_state(
+    df: pd.DataFrame,
+    ylabel: str = "Peak Demand (MW)",
+    title: str = "Peak Demand by Year — Baseline vs Policy",
+    xticks: Iterable[int] = (2026, 2030, 2035, 2040),
+    height: float = 3.5,
+    col_wrap: int = 4,
+    sharey: bool = False
+) -> None:
+    """
+    Faceted line plot by state comparing Baseline vs Policy peaks (MW), annotated at 2040.
+    """
+    if df.empty:
+        return
+
+    _df = df.rename(columns={"peak_mw":"value"}).copy()
+    sns.set_context("talk", rc={"lines.linewidth": 2})
+    g = sns.FacetGrid(_df, col="state_abbr", col_wrap=col_wrap, height=height, sharey=sharey)
+    g.map_dataframe(sns.lineplot, x="year", y="value", hue="scenario", marker="o")
+    g.set_titles("{col_name}")
+    g.set_axis_labels("Year", ylabel)
+    g.set(xticks=list(xticks))
+    g.add_legend()
+    g.fig.suptitle(title, y=1.02)
+
+    years = pd.to_numeric(_df["year"], errors="coerce").dropna().astype(int)
+    preferred_year = 2040 if (len(years) and 2040 in set(years)) else (int(years.max()) if len(years) else None)
+    if preferred_year is not None:
+        for state, ax in g.axes_dict.items():
+            sdf = _df[_df["state_abbr"] == state].dropna(subset=["value","year"])
+            if sdf.empty: continue
+            years_s = sdf["year"].astype(int).unique()
+            end_year = preferred_year if preferred_year in years_s else int(sdf["year"].max())
+            end_points = []
+            for scen, sg in sdf.groupby("scenario"):
+                sg = sg.sort_values("year")
+                g_end = sg[sg["year"] == end_year]
+                if g_end.empty:
+                    g_end = sg[sg["year"] <= end_year].tail(1)
+                if not g_end.empty:
+                    end_points.append((scen, float(g_end["year"].iloc[-1]), float(g_end["value"].iloc[-1])))
+            if not end_points: continue
+            vals = np.array([p[2] for p in end_points])
+            yrange = max(1.0, float(vals.max() - vals.min()) or 1.0)
+            sep = yrange * 0.01
+            used = []
+            for scen, x_end, y_end in sorted(end_points, key=lambda t: t[2]):
+                offset = 0
+                for u in used:
+                    if abs(y_end - u) < sep:
+                        offset += 6
+                used.append(y_end)
+                ax.annotate(f"{y_end:.1f} MW", xy=(x_end, y_end),
+                            xytext=(6, offset), textcoords="offset points",
+                            ha="left", va="center", fontsize=9, fontweight="bold")
+    plt.show()
+
+
 def discover_state_dirs(root_dir: str) -> List[str]:
     """
     Return absolute paths of immediate subdirectories under `root_dir`.
@@ -629,6 +855,7 @@ __all__ = [
     # Plotting
     "facet_lines_by_state",
     "bar_tech_potential_2040",
+    "find_state_hourly_file", "load_state_peaks_df", "process_all_states_peaks", "facet_peaks_by_state",
 
     # US deltas & totals
     "build_national_deltas",
