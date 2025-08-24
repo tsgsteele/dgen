@@ -2,7 +2,7 @@ logsPolicy:
   destination: CLOUD_LOGGING
 
 taskGroups:
-  - taskCount: "7"               # one task per state
+  - taskCount: "27"               # one task per state
     parallelism: "7"             # run all states in parallel
     schedulingPolicy: AS_SOON_AS_POSSIBLE
 
