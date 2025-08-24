@@ -97,7 +97,7 @@ def export_one_schema(
     from psycopg2 import sql as _sql
 
     EXCLUDE_COLS = {
-        "wholesale_prices_ndarray",
+        "wholesale_prices",
         "consumption_hourly_list",
         "generation_hourly_list",
         "batt_dispatch_profile_list",
