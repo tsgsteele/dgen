@@ -103,7 +103,7 @@ def calc_system_performance(
     agent: pd.Series,
     rate_switch_table: Optional[pd.DataFrame],
     en_batt: bool = True,
-    batt_dispatch: str = 'price_signal_forecast',
+    batt_dispatch: str = 'price_signal_forecast'
 ):
     """
     Objective function for scalar search on PV kW (battery sized internally).
@@ -139,7 +139,7 @@ def calc_system_performance(
 
         pv_to_batt_ratio = 1
         batt_capacity_to_power_ratio = 2.0
-        desired_size  = kw / pv_to_batt_ratio
+        desired_size  = 8
         desired_power = desired_size / batt_capacity_to_power_ratio
         desired_voltage = 500 if agent.loc['sector_abbr'] != 'res' else 240
         battery_tools.battery_model_sizing(
@@ -151,7 +151,6 @@ def calc_system_performance(
         batt.BatteryCell.batt_initial_SOC = 30
 
         # Dispatch: retail-rate aware, no grid-charging unless surplus
-        batt.BatteryDispatch.batt_dispatch_choice = 4
         configure_retail_rate_dispatch(
             batt,
             allow_export=True,
@@ -186,10 +185,10 @@ def calc_system_performance(
 
         # Wire up loan pieces for battery case
         loan.BatterySystem.en_batt = 1
-        loan.BatterySystem.batt_computed_bank_capacity = batt.BatterySystem.batt_power_discharge_max_kwdc
+        loan.BatterySystem.batt_computed_bank_capacity = batt.Outputs.batt_bank_installed_capacity
         loan.BatterySystem.batt_bank_replacement = batt.Outputs.batt_bank_replacement
 
-        loan.SystemCosts.add_om_num_types = 1
+        loan.SystemCosts.add_om_num_types = 0
         if kw > 0:
             #loan.SystemCosts.om_capacity = [costs['system_om_per_kw_combined'] + costs['system_variable_om_per_kw_combined']]
             loan.SystemCosts.om_batt_capacity_cost = [0.0]
@@ -259,16 +258,20 @@ def calc_system_performance(
     )
     loan.FinancialParameters.system_capacity = kw
 
-    annual_energy_value = (
-        [utilityrate.Outputs.annual_energy_value[0]] +
-        [x + value_of_resiliency for i, x in enumerate(utilityrate.Outputs.annual_energy_value) if i != 0]
-    )
+    aev = list(utilityrate.Outputs.annual_energy_value)
+    annual_energy_value = [aev[0] + value_of_resiliency] + [x + value_of_resiliency for x in aev[1:]]
+
     loan.SystemOutput.annual_energy_value = annual_energy_value
     loan.SystemOutput.gen = utilityrate.SystemOutput.gen
 
     direct_costs = (system_costs + batt_costs) * costs['cap_cost_multiplier']
     sales_tax = 0.0
     loan.SystemCosts.total_installed_cost = direct_costs + sales_tax + one_time_charge
+
+    # ITC for batteries
+    itc_batt_basis = batt_costs  # or narrow to the portion of batt costs you deem eligible
+    loan.TaxCreditIncentives.itc_fed_percent = [0.0]      # don't double count via percent
+    loan.TaxCreditIncentives.itc_fed_amount  = [0.30 * itc_batt_basis]
 
     loan.execute()
     return -loan.Outputs.npv
@@ -308,6 +311,7 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     # 3) PySAM setup
     t_setup = time.time()
     driver_mod, batt, utilityrate, loan, market_flag = _init_pv_batt_stack(agent.loc['sector_abbr'])
+
     loan.FinancialParameters.market = market_flag
 
     utilityrate.Lifetime.inflation_rate = agent.loc['inflation_rate'] * 100
@@ -386,8 +390,8 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     max_system = max_load
     tol        = min(0.25 * max_system, 0.25)
     batt_disp  = 'peak_shaving' if agent.loc['sector_abbr'] != 'res' else 'price_signal_forecast'
-    low        = max_system * 0.5
-    high       = max_system
+    low        = max_system * 0.8
+    high       = max_system * 1.5
 
     def perf_with_batt(x):
         return calc_system_performance(
@@ -409,7 +413,7 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     out_w_loan = loan.Outputs.export()
     out_w_util = utilityrate.Outputs.export()
     gen_w_annual = float(np.sum(utilityrate.SystemOutput.gen))
-    kw_w         = batt.BatterySystem.batt_power_charge_max_kwdc
+    kw_w         = batt.BatterySystem.batt_power_discharge_max_kwdc
     kwh_w        = batt.Outputs.batt_bank_installed_capacity
 
     load_w_ts    = np.asarray(utilityrate.Load.load, dtype=float)
