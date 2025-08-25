@@ -457,6 +457,9 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
             _pv_w_raw = getattr(utilityrate.SystemOutput, "gen", [])
         pv_w_ts  = np.asarray(_pv_w_raw, dtype=float)
         npv_w    = out_b_loan.get("npv", float("-inf"))
+
+        # NEW: capture battery → load timeseries (kWh) for peak shaving contribution
+        btl_w_ts = np.asarray(getattr(batt.Outputs, "batt_to_load", []), dtype=float)  # ← NEW
     else:
         # No feasible battery or it never improved NPV
         npv_w = float('-inf')
@@ -492,7 +495,8 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
         ibi           = out_b_loan.get('ibi_total', 0.0)
         pbi           = out_b_loan.get('cf_pbi_total', 0.0)
 
-        load_ts, pv_ts = _align_to_n(load_w_ts, pv_w_ts)
+        # CHANGED: align batt_to_load too
+        load_ts, pv_ts, btl_ts = _align_to_n(load_w_ts, pv_w_ts, btl_w_ts)  # ← CHANGED
     else:
         # PV-only wins (unchanged)
         system_kw     = float(res_n.x)
@@ -509,26 +513,30 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
         pbi           = out_n_loan.get('cf_pbi_total', 0.0)
 
         load_ts, pv_ts = _align_to_n(load_n_ts, pv_n_ts)
+        btl_ts = np.zeros_like(load_ts)  # ← NEW: no battery contribution
 
     # Guard against div/0 in savings % below
     if not first_without or first_without == 0:
         first_without = 1.0
 
     # --- Build arrays for aggregation (per-customer kW) ---
-    # Baseline (pre-system) net = load (fallback to load_ts if 'cons' missing)
     try:
         _cons_arr = np.asarray(cons, dtype=float)
     except Exception:
         _cons_arr = load_ts
     agent.loc['baseline_net_hourly'] = _cons_arr[:load_ts.size].tolist()
 
-    # Adopter components and net for this year (clip to avoid negative net / exports)
-    adopter_load_ts = load_ts
-    adopter_pv_ts   = pv_ts
-    adopter_net_ts  = np.maximum(adopter_load_ts - adopter_pv_ts, 0.0)
+    # Adopter components and net for this year
+    adopter_load_ts  = load_ts
+    adopter_pv_ts    = pv_ts
+    adopter_batt_ts  = btl_ts                         # ← NEW: store batt→load explicitly
+    adopter_net_ts   = np.maximum(
+        adopter_load_ts - adopter_pv_ts - adopter_batt_ts, 0.0
+    )                                                 # ← CHANGED: subtract battery, too
 
     agent.loc['adopter_load_hourly'] = adopter_load_ts.tolist()
     agent.loc['adopter_pv_hourly']   = adopter_pv_ts.tolist()
+    agent.loc['adopter_batt_hourly'] = adopter_batt_ts.tolist()  # ← NEW
     agent.loc['adopter_net_hourly']  = adopter_net_ts.tolist()
 
 
