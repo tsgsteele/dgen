@@ -5,6 +5,7 @@ import os
 import re
 import glob
 import math
+import json
 from dataclasses import dataclass
 from multiprocessing import Pool, cpu_count
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -26,8 +27,8 @@ NEEDED_COLS = [
     "year",
 
     # Cohort/cumulative adopters:
-    "new_adopters",           # new adopters in that year (cohort size)  <-- used for savings math
-    "number_of_adopters",     # cumulative adopters in that year         <-- kept for plots
+    "new_adopters",           # new adopters in that year (cohort size)
+    "number_of_adopters",     # cumulative adopters in that year
 
     # Savings and pricing:
     "first_year_elec_bill_savings",
@@ -40,20 +41,18 @@ NEEDED_COLS = [
     # PV / storage:
     "system_kw",
     "system_kw_cum",
+    "batt_kwh",        # per-agent storage size for median calc (if absent, we add as NaN)
     "batt_kwh_cum",
 ]
 
 SCHEMA_RE = re.compile(r"^diffusion_results_(baseline|policy)_([a-z]{2})_", re.IGNORECASE)
 
 
+# =============================================================================
+# Hourly array helpers
+# =============================================================================
 
-# ============================
-# Hourly → Peak helpers
-# ============================
-
-import json
-
-def _parse_array_text_to_floats(s: str) -> list[float]:
+def _parse_array_text_to_floats(s: str) -> List[float]:
     """
     Accept Postgres array text like '{1,2,3}' or JSON-like '[1,2,3]' and return [1.0, 2.0, 3.0].
     Returns [] on any parse issue.
@@ -83,8 +82,168 @@ def _parse_array_text_to_floats(s: str) -> list[float]:
     return []
 
 
+# =============================================================================
+# Standalone hourly → daily/monthly plotter (Baseline vs Policy), with GW annotations
+# =============================================================================
+
+def _load_hourly_one(path: str) -> pd.DataFrame:
+    """
+    Load a single hourly CSV and ensure scenario/state/year and net_load array exist.
+    Expects 'net_sum_text' with 8760-ish hourly values (MW).
+    """
+    df = pd.read_csv(path)
+    # infer scenario from filename if missing
+    if "scenario" not in df.columns:
+        fname = os.path.basename(path).lower()
+        df["scenario"] = "policy" if "policy" in fname else ("baseline" if "baseline" in fname else "unknown")
+    # infer state from folder if missing
+    if "state_abbr" not in df.columns:
+        df["state_abbr"] = os.path.basename(os.path.dirname(path)).upper()
+    if "net_sum_text" not in df.columns:
+        raise ValueError(f"'net_sum_text' column not found in {path}")
+    df["net_load"] = df["net_sum_text"].apply(_parse_array_text_to_floats)
+    return df
+
+
+def _pick_year_row(df: pd.DataFrame, scenario: str, year: int) -> Optional[pd.Series]:
+    """Return one row for the given scenario/year with a valid net_load array."""
+    sdf = df[(df["scenario"].str.lower() == scenario.lower()) & (df["year"] == year)].copy()
+    if sdf.empty:
+        return None
+    exact = sdf[sdf["net_load"].apply(lambda a: isinstance(a, list) and len(a) > 0)]
+    return (exact.iloc[0] if not exact.empty else None)
+
+
+def _to_time_series(arr: List[float], year: int) -> pd.Series:
+    """
+    Build an hourly pandas Series from an array and a year.
+    Works for 8760, 8784 (leap), or partial lengths.
+    """
+    n = len(arr)
+    idx = pd.date_range(start=f"{year}-01-01 00:00:00", periods=n, freq="h")
+    return pd.Series(arr, index=idx)
+
+
+def _aggregate_series(s: pd.Series, aggregation: str = "hourly", agg_func: str = "mean") -> pd.Series:
+    """
+    aggregation: 'hourly' | 'daily' | 'weekly' | 'monthly'
+    agg_func:    'mean' | 'sum' | 'max' | 'min' (applies when not hourly)
+    """
+    aggregation = aggregation.lower()
+    agg_func = agg_func.lower()
+
+    if aggregation == "hourly":
+        return s
+
+    rule = {"daily": "D", "weekly": "W", "monthly": "M"}.get(aggregation)
+    if rule is None:
+        raise ValueError("aggregation must be one of: 'hourly', 'daily', 'weekly', 'monthly'")
+
+    if agg_func not in {"mean", "sum", "max", "min"}:
+        raise ValueError("agg_func must be one of: 'mean', 'sum', 'max', 'min'")
+
+    return getattr(s.resample(rule), agg_func)()
+
+
+def plot_state_netload(
+    state_dir: Optional[str] = None,
+    baseline_csv: Optional[str] = None,
+    policy_csv: Optional[str] = None,
+    year: int = 2040,
+    aggregation: str = "daily",     # 'hourly' | 'daily' | 'weekly' | 'monthly'
+    agg_func: str = "max",          # used for non-hourly: 'mean'|'sum'|'max'|'min'
+    title: Optional[str] = None,
+) -> None:
+    """
+    Plot Baseline & Policy net load for a specific year at chosen aggregation.
+    Provide either:
+      - state_dir  (auto-discovers hourly_baseline* and hourly_policy*), OR
+      - both baseline_csv and policy_csv explicitly.
+    Adds on-plot annotations (GW) for the maxima of the aggregated series.
+    """
+    # Load data
+    if state_dir:
+        b_matches = sorted(glob.glob(os.path.join(state_dir, "hourly_baseline*.csv")))
+        p_matches = sorted(glob.glob(os.path.join(state_dir, "hourly_policy*.csv")))
+        frames: List[pd.DataFrame] = []
+        if b_matches: frames.append(_load_hourly_one(b_matches[0]))
+        if p_matches: frames.append(_load_hourly_one(p_matches[0]))
+        if not frames:
+            # fallback to any hourly*.csv with both scenarios inside
+            any_matches = sorted(glob.glob(os.path.join(state_dir, "hourly*.csv")))
+            if not any_matches:
+                raise FileNotFoundError("No hourly_* CSVs found in state_dir.")
+            frames = [_load_hourly_one(p) for p in any_matches]
+        df = pd.concat(frames, ignore_index=True)
+    else:
+        if not (baseline_csv and policy_csv):
+            raise ValueError("Provide either state_dir OR both baseline_csv and policy_csv.")
+        df = pd.concat([_load_hourly_one(baseline_csv), _load_hourly_one(policy_csv)], ignore_index=True)
+
+    # Ensure numeric year
+    if "year" not in df.columns:
+        raise ValueError("'year' column is required in hourly CSVs.")
+    df["year"] = pd.to_numeric(df["year"], errors="coerce")
+
+    # Pick rows for each scenario at the specified year
+    brow = _pick_year_row(df, "baseline", year)
+    prow = _pick_year_row(df, "policy", year)
+    if brow is None:
+        raise ValueError(f"No baseline record found for year {year}.")
+    if prow is None:
+        raise ValueError(f"No policy record found for year {year}.")
+
+    # Build time series
+    s_base = _to_time_series(brow["net_load"], int(brow["year"]))
+    s_poli = _to_time_series(prow["net_load"], int(prow["year"]))
+
+    # Aggregate
+    s_base_agg = _aggregate_series(s_base, aggregation=aggregation, agg_func=agg_func)
+    s_poli_agg = _aggregate_series(s_poli, aggregation=aggregation, agg_func=agg_func)
+
+    # Labels
+    if title is None:
+        nice_agg = aggregation.capitalize()
+        nice_func = agg_func.upper() if aggregation != "hourly" else ""
+        title = f"{nice_agg} Net Load — Baseline vs Policy ({year})" + (f" [{nice_func}]" if nice_func else "")
+
+    # Plot
+    plt.figure(figsize=(14, 6))
+    plt.plot(s_base_agg.index, s_base_agg.values, label="Baseline", alpha=0.9)
+    plt.plot(s_poli_agg.index, s_poli_agg.values, label="Policy", alpha=0.9)
+
+    plt.xlabel("Time")
+    plt.ylabel("Net Load (MW)")
+    plt.title(title)
+    plt.legend()
+
+    # --- Annotations (maxima, shown in GW) ---
+    base_max = float(s_base_agg.max())
+    poli_max = float(s_poli_agg.max())
+    base_date = s_base_agg.idxmax()
+    poli_date = s_poli_agg.idxmax()
+
+    plt.annotate(f"{base_max/1000:.1f} GW (baseline)",
+                 xy=(base_date, base_max),
+                 xytext=(0, 8),
+                 textcoords="offset points",
+                 ha="center", color="black", fontweight="bold")
+
+    plt.annotate(f"{poli_max/1000:.1f} GW (policy)",
+                 xy=(poli_date, poli_max),
+                 xytext=(0, -12),
+                 textcoords="offset points",
+                 ha="center", color="black", fontweight="bold")
+
+    plt.tight_layout()
+    plt.show()
+
+
+# =============================================================================
+# Hourly → state/year peaks (MW) from CSVs (used by multiple plots)
+# =============================================================================
+
 def find_state_hourly_files(state_dir: str, run_id: Optional[str] = None) -> List[str]:
-    import glob, os
     paths: List[str] = []
     if run_id:
         paths += glob.glob(os.path.join(state_dir, f"hourly_baseline_{run_id}.csv"))
@@ -104,50 +263,13 @@ def find_state_hourly_files(state_dir: str, run_id: Optional[str] = None) -> Lis
             seen.add(p); out.append(p)
     return out
 
+
 def load_state_peaks_df(state_dir: str, run_id: Optional[str] = None) -> pd.DataFrame:
-    paths = find_state_hourly_files(state_dir, run_id)
-    if not paths:
-        return pd.DataFrame(columns=["state_abbr","scenario","year","peak_mw"])
-
-    frames: List[pd.DataFrame] = []
-    for path in paths:
-        if not os.path.exists(path) or os.path.getsize(path) == 0:
-            continue
-        try:
-            df = pd.read_csv(path)
-        except pd.errors.EmptyDataError:
-            continue
-
-        # ensure required cols & infer scenario if missing (from filename)
-        if "scenario" not in df.columns:
-            fname = os.path.basename(path).lower()
-            df["scenario"] = "policy" if "policy" in fname else ("baseline" if "baseline" in fname else np.nan)
-        if "state_abbr" not in df.columns:
-            df["state_abbr"] = os.path.basename(os.path.dirname(path)).upper()
-        if not {"state_abbr","scenario","year","net_sum_text"}.issubset(df.columns):
-            continue
-
-        def _peak(row) -> float:
-            arr = _parse_array_text_to_floats(str(row.get("net_sum_text","")))
-            return float(np.max(arr)) if arr else np.nan
-
-        d = df.copy()
-        d["peak_mw"] = d.apply(_peak, axis=1)
-        d = d[["state_abbr","scenario","year","peak_mw"]].dropna(subset=["peak_mw"])
-        d["year"] = pd.to_numeric(d["year"], errors="coerce")
-        d = d.dropna(subset=["year"])
-        frames.append(d)
-
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["state_abbr","scenario","year","peak_mw"])
-
-
-def load_state_peaks_df(state_dir: str, run_id: str | None = None) -> pd.DataFrame:
     """
     Read one state's hourly CSV(s) and compute peak demand (MW) per year, by scenario.
-    Supports scenario-specific files (hourly_baseline_* / hourly_policy_*) and the legacy single-file style.
-    Returns columns: ['state_abbr','scenario','year','peak_mw'].
+    Returns: ['state_abbr','scenario','year','peak_mw'].
     """
-    paths = find_state_hourly_files(state_dir, run_id)  # may return 0, 1, or 2 files
+    paths = find_state_hourly_files(state_dir, run_id)
     if not paths:
         return pd.DataFrame(columns=["state_abbr", "scenario", "year", "peak_mw"])
 
@@ -187,9 +309,9 @@ def load_state_peaks_df(state_dir: str, run_id: str | None = None) -> pd.DataFra
 
 def process_all_states_peaks(
     root_dir: str,
-    run_id: str | None = None,
+    run_id: Optional[str] = None,
     n_jobs: int = 1,
-    states: Iterable[str] | None = None,
+    states: Optional[Iterable[str]] = None,
 ) -> pd.DataFrame:
     """
     Aggregate peak demand (MW) per year for all requested states.
@@ -203,15 +325,38 @@ def process_all_states_peaks(
         return pd.DataFrame(columns=["state_abbr","scenario","year","peak_mw"])
 
     tasks = [(sd, run_id) for sd in state_dirs]
-    results: list[pd.DataFrame] = []
+    results: List[pd.DataFrame] = []
     n_jobs = max(1, min(n_jobs, max(1, (cpu_count() or 2) - 1)))
     if n_jobs == 1:
-        results = [load_state_peaks_df(sd, run_id) for sd, run_id in tasks]
+        results = [load_state_peaks_df(sd, run_id) for sd, _ in tasks]
     else:
         with Pool(processes=n_jobs) as pool:
             for df in pool.starmap(load_state_peaks_df, tasks):
                 results.append(df)
     return pd.concat(results, ignore_index=True) if results else pd.DataFrame(columns=["state_abbr","scenario","year","peak_mw"])
+
+
+# =============================================================================
+# Facet: state-level peak (by year), with optional US delta tile
+# =============================================================================
+
+def _build_us_peak_delta(peaks_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    From per-state peak_mw by scenario/year, build a single 'US Δ' facet that shows
+    Policy − Baseline (MW). Note: sums state peaks by year; hours may differ across states.
+    """
+    if peaks_df.empty:
+        return pd.DataFrame(columns=["state_abbr","scenario","year","peak_mw"])
+
+    nat = (peaks_df.groupby(["year","scenario"], as_index=False)["peak_mw"].sum())
+    piv = nat.pivot(index="year", columns="scenario", values="peak_mw")
+    if "policy" not in piv.columns or "baseline" not in piv.columns:
+        return pd.DataFrame(columns=["state_abbr","scenario","year","peak_mw"])
+
+    d = (piv["policy"] - piv["baseline"]).rename("peak_mw").reset_index()
+    d["state_abbr"] = "US Δ"
+    d["scenario"] = "delta"
+    return d[["state_abbr","scenario","year","peak_mw"]]
 
 
 def facet_peaks_by_state(
@@ -221,13 +366,20 @@ def facet_peaks_by_state(
     xticks: Iterable[int] = (2026, 2030, 2035, 2040),
     height: float = 3.5,
     col_wrap: int = 4,
-    sharey: bool = False
+    sharey: bool = False,
+    include_us_delta: bool = False,
 ) -> None:
     """
     Faceted line plot by state comparing Baseline vs Policy peaks (MW), annotated at 2040.
+    If include_us_delta=True, appends a 'US Δ' facet showing Policy−Baseline (MW) as a single line.
     """
     if df.empty:
         return
+
+    if include_us_delta:
+        us_delta = _build_us_peak_delta(df)
+        if not us_delta.empty:
+            df = pd.concat([df, us_delta], ignore_index=True)
 
     _df = df.rename(columns={"peak_mw":"value"}).copy()
     sns.set_context("talk", rc={"lines.linewidth": 2})
@@ -244,7 +396,8 @@ def facet_peaks_by_state(
     if preferred_year is not None:
         for state, ax in g.axes_dict.items():
             sdf = _df[_df["state_abbr"] == state].dropna(subset=["value","year"])
-            if sdf.empty: continue
+            if sdf.empty:
+                continue
             years_s = sdf["year"].astype(int).unique()
             end_year = preferred_year if preferred_year in years_s else int(sdf["year"].max())
             end_points = []
@@ -255,7 +408,8 @@ def facet_peaks_by_state(
                     g_end = sg[sg["year"] <= end_year].tail(1)
                 if not g_end.empty:
                     end_points.append((scen, float(g_end["year"].iloc[-1]), float(g_end["value"].iloc[-1])))
-            if not end_points: continue
+            if not end_points:
+                continue
             vals = np.array([p[2] for p in end_points])
             yrange = max(1.0, float(vals.max() - vals.min()) or 1.0)
             sep = yrange * 0.01
@@ -266,153 +420,199 @@ def facet_peaks_by_state(
                     if abs(y_end - u) < sep:
                         offset += 6
                 used.append(y_end)
-                ax.annotate(f"{y_end:.1f} MW", xy=(x_end, y_end),
+                label = f"{y_end:.1f} MW" if state != "US Δ" else f"{y_end:.1f} MW (Δ)"
+                ax.annotate(label, xy=(x_end, y_end),
                             xytext=(6, offset), textcoords="offset points",
                             ha="left", va="center", fontsize=9, fontweight="bold")
     plt.show()
 
 
-def discover_state_dirs(root_dir: str) -> List[str]:
+# =============================================================================
+# NEW: Facet — state-level daily/weekly peak time series (one year)
+# =============================================================================
+
+def facet_state_peak_timeseries_from_hourly(
+    root_dir: str,
+    run_id: Optional[str] = None,
+    year: int = 2040,
+    height: float = 2.8,
+    col_wrap: int = 5,
+    sharey: bool = False,
+    title: Optional[str] = None,
+    states: Optional[Iterable[str]] = None,
+) -> None:
     """
-    Return absolute paths of immediate subdirectories under `root_dir`.
-    Each subdirectory is expected to be a state folder (e.g., 'CA', 'ny').
+    Faceted per-state WEEKLY peak net load for a single year (Baseline vs Policy).
+
+    - Lines: solid for both scenarios.
+    - Annotations: peak value (GW) for both scenarios, black text, '(policy)' / '(baseline)'.
+    - X-axis ticks: weeks 1, 25, 52.
     """
-    return sorted(
-        os.path.join(root_dir, d)
-        for d in os.listdir(root_dir)
-        if os.path.isdir(os.path.join(root_dir, d))
-    )
-
-
-def find_state_files(state_dir: str, run_id: Optional[str] = None, strict_run_id: bool = True) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Locate per-state CSVs for baseline and policy.
-
-    If run_id is provided and strict_run_id=True (default), return only files that match
-    baseline_{run_id}.csv and policy_{run_id}.csv; otherwise return (None, None) for missing.
-    If strict_run_id=False, falls back to any baseline*/policy* when both exact matches are absent.
-    """
-    if run_id:
-        b = glob.glob(os.path.join(state_dir, f"baseline_{run_id}.csv"))
-        p = glob.glob(os.path.join(state_dir, f"policy_{run_id}.csv"))
-        if strict_run_id:
-            return (b[0] if b else None), (p[0] if p else None)
-        if b and p:
-            return b[0], p[0]
-
-    # Fallback (only used when strict_run_id=False or no run_id provided)
-    b = glob.glob(os.path.join(state_dir, "baseline*.csv"))
-    p = glob.glob(os.path.join(state_dir, "policy*.csv"))
-    return (b[0] if b else None), (p[0] if p else None)
-
-
-def _read_with_selected_cols(path: str) -> pd.DataFrame:
-    """
-    Read a CSV keeping only columns present from NEEDED_COLS; missing columns are added.
-    If `scenario` or `state_abbr` is missing, they are inferred from file and directory names.
-    Robust to empty/zero-byte CSVs.
-    """
-    if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
-        return pd.DataFrame(columns=NEEDED_COLS)
-
-    try:
-        header = pd.read_csv(path, nrows=0)
-    except pd.errors.EmptyDataError:
-        return pd.DataFrame(columns=NEEDED_COLS)
-
-    present = [c for c in NEEDED_COLS if c in header.columns]
-
-    try:
-        df = pd.read_csv(path, usecols=present) if present else pd.DataFrame(columns=NEEDED_COLS)
-    except (pd.errors.EmptyDataError, ValueError):
-        # ValueError can occur if usecols don’t match due to malformed header
-        return pd.DataFrame(columns=NEEDED_COLS)
-
-    # Add missing columns
-    for c in NEEDED_COLS:
-        if c not in df.columns:
-            df[c] = np.nan
-
-    # Infer scenario/state if absent
-    filename = os.path.basename(path).lower()
-    if df["scenario"].isna().all():
-        df["scenario"] = "baseline" if "baseline" in filename else ("policy" if "policy" in filename else np.nan)
-
-    if df["state_abbr"].isna().any():
-        state = os.path.basename(os.path.dirname(path)).upper()
-        df.loc[df["state_abbr"].isna(), "state_abbr"] = state
-
-    return df
-
-
-def load_state_df(state_dir: str, run_id: Optional[str] = None) -> pd.DataFrame:
-    """
-    Load baseline and policy CSVs for a single state and concatenate them.
-
-    Returns:
-        DataFrame with (at minimum) NEEDED_COLS; missing columns are filled with NaN/0.
-    """
-    b_csv, p_csv = find_state_files(state_dir, run_id)
-    parts: List[pd.DataFrame] = []
-    for p in (b_csv, p_csv):
-        if p:
-            parts.append(_read_with_selected_cols(p))
-    if not parts:
-        return pd.DataFrame(columns=NEEDED_COLS)
-
-    df = pd.concat(parts, ignore_index=True)
-
-    # Basic typing
-    for col in ("year", "new_adopters", "number_of_adopters",
-                "first_year_elec_bill_savings", "system_kw",
-                "system_kw_cum", "batt_kwh_cum",
-                "customers_in_bin", "max_market_share",
-                "avg_elec_price_cents_per_kwh"):
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    # Fill non-negative quantities
-    for col in ("new_adopters", "number_of_adopters", "first_year_elec_bill_savings",
-                "customers_in_bin", "max_market_share",
-                "system_kw_cum", "batt_kwh_cum"):
-        if col in df.columns:
-            df[col] = df[col].fillna(0.0)
-
-    return df
-
-
-def stream_combine_two_csvs(baseline_csv: Optional[str], policy_csv: Optional[str],
-                            out_csv: str, chunksize: int = 200_000) -> None:
-    """
-    Stream-append baseline and policy CSVs into `out_csv`. Creates directories as needed.
-    No attempt is made to de-duplicate records.
-    """
-    if not baseline_csv and not policy_csv:
+    # ---- discover/load states ----
+    state_dirs = discover_state_dirs(root_dir)
+    if states:
+        wanted = {s.strip().upper() for s in states if s and s.strip()}
+        state_dirs = [sd for sd in state_dirs if os.path.basename(sd).upper() in wanted]
+    if not state_dirs:
         return
-    os.makedirs(os.path.dirname(out_csv), exist_ok=True)
 
-    wrote_header = False
-    for path in (baseline_csv, policy_csv):
-        if not path or not os.path.exists(path):
-            continue
-        for chunk in pd.read_csv(path, chunksize=chunksize):
-            if "scenario" not in chunk.columns:
-                chunk["scenario"] = "baseline" if "baseline" in os.path.basename(path).lower() else "policy"
-            if "state_abbr" not in chunk.columns:
-                chunk["state_abbr"] = os.path.basename(os.path.dirname(path)).upper()
-            chunk.to_csv(out_csv, mode="w" if not wrote_header else "a", index=False, header=not wrote_header)
-            wrote_header = True
+    def _load_state_hourly_two(sd: str) -> Optional[pd.DataFrame]:
+        paths = find_state_hourly_files(sd, run_id)
+        if not paths:
+            return None
+        frames = []
+        for pth in paths:
+            try:
+                df = pd.read_csv(pth)
+            except Exception:
+                continue
+            if "scenario" not in df.columns:
+                fn = os.path.basename(pth).lower()
+                df["scenario"] = "policy" if "policy" in fn else ("baseline" if "baseline" in fn else np.nan)
+            if "state_abbr" not in df.columns:
+                df["state_abbr"] = os.path.basename(sd).upper()
+            frames.append(df)
+        if not frames:
+            return None
+        df = pd.concat(frames, ignore_index=True)
+
+        needed = {"state_abbr", "scenario", "year", "net_sum_text"}
+        if not needed.issubset(df.columns):
+            return None
+
+        df["year"] = pd.to_numeric(df["year"], errors="coerce")
+        df = df[df["year"] == year]
+
+        def _arr_ok(x):
+            arr = _parse_array_text_to_floats(str(x))
+            return (len(arr) > 0, arr)
+
+        if df.empty:
+            return None
+        df["_ok"], df["_arr"] = zip(*df["net_sum_text"].map(_arr_ok))
+        df = df[df["_ok"]]
+        if df.empty:
+            return None
+
+        out_rows = []
+        for scen in ("baseline", "policy"):
+            g = df[df["scenario"].str.lower() == scen]
+            if not g.empty:
+                r = g.iloc[0]
+                out_rows.append({
+                    "state_abbr": r["state_abbr"],
+                    "scenario": scen,
+                    "year": int(year),
+                    "net_load": r["_arr"],
+                })
+        return pd.DataFrame(out_rows) if out_rows else None
+
+    rows = []
+    for sd in state_dirs:
+        d = _load_state_hourly_two(sd)
+        if d is not None:
+            rows.append(d)
+    if not rows:
+        return
+    df_pairs = pd.concat(rows, ignore_index=True)
+
+    # ---- weekly peaks (MW) + week numbers ----
+    def _weekly_max(arr: List[float]) -> pd.Series:
+        s = pd.Series(arr, index=pd.date_range(f"{year}-01-01", periods=len(arr), freq="h"))
+        wk = s.resample("W").max()
+        weeks = wk.index.isocalendar().week.astype(int)
+        wk.index = weeks
+        wk.index.name = "week"
+        return wk
+
+    pieces = []
+    for (state, scen), g in df_pairs.groupby(["state_abbr", "scenario"]):
+        ts = _weekly_max(g["net_load"].iloc[0])
+        pieces.append(pd.DataFrame({
+            "state_abbr": state,
+            "scenario": scen,
+            "week": ts.index.astype(int),
+            "peak_mw": ts.values,
+        }))
+    d = pd.concat(pieces, ignore_index=True)
+
+    # ---- facets ----
+    sns.set_context("talk", rc={"lines.linewidth": 1})
+    states_order = sorted(d["state_abbr"].unique())
+    n = len(states_order)
+    ncols = col_wrap
+    nrows = int(math.ceil(n / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(3.4*ncols, height*nrows), sharey=sharey)
+    axes = np.atleast_1d(axes).ravel()
+
+    pal = sns.color_palette()
+    color_baseline = pal[0]  # blue
+    color_policy   = pal[1]  # orange
+
+    for ax, state in zip(axes, states_order):
+        sub = d[d["state_abbr"] == state]
+        pol = sub[sub["scenario"] == "policy"].sort_values("week")
+        bas = sub[sub["scenario"] == "baseline"].sort_values("week")
+
+        # solid lines for both
+        if not pol.empty:
+            ax.plot(pol["week"], pol["peak_mw"], color=color_policy, linewidth=2, label="policy", zorder=1)
+        if not bas.empty:
+            ax.plot(bas["week"], bas["peak_mw"], color=color_baseline, linewidth=2, label="baseline", zorder=2)
+
+        # annotate peaks (in GW), small black text; offset to avoid overlap
+        fs = 7  # small font for tight facets
+        if not bas.empty:
+            b_idx = int(bas["peak_mw"].idxmax())
+            b_wk  = int(bas.loc[b_idx, "week"])
+            b_val = float(bas.loc[b_idx, "peak_mw"])
+            # nudge baseline label slightly below to reduce collision with policy label
+            ax.annotate(f"{b_val/1000:.1f} GW (baseline)",
+                        xy=(b_wk, b_val), xytext=(0, -10),
+                        textcoords="offset points", ha="center", va="top",
+                        fontsize=fs, color="black")
+        if not pol.empty:
+            p_idx = int(pol["peak_mw"].idxmax())
+            p_wk  = int(pol.loc[p_idx, "week"])
+            p_val = float(pol.loc[p_idx, "peak_mw"])
+            ax.annotate(f"{p_val/1000:.1f} GW (policy)",
+                        xy=(p_wk, p_val), xytext=(0, 8),
+                        textcoords="offset points", ha="center", va="bottom",
+                        fontsize=fs, color="black")
+
+        ax.set_title(state)
+        ax.set_xlim(1, 53)
+        ax.set_xticks([1, 25, 52])     # sparse ticks as requested
+        ax.set_xlabel("Week of Year")
+        ax.set_ylabel("Weekly Peak (MW)")
+        ax.grid(True, axis="y", alpha=0.25)
+
+    # hide any extra axes
+    for ax in axes[len(states_order):]:
+        ax.set_visible(False)
+
+    fig.suptitle(title or f"Weekly Peak Net Load — Baseline vs Policy ({year})", y=1.02)
+
+    # compact shared legend
+    from matplotlib.lines import Line2D
+    handles = [
+        Line2D([0], [0], color=color_baseline, linewidth=2, linestyle="-", label="baseline"),
+        Line2D([0], [0], color=color_policy,   linewidth=2, linestyle="-", label="policy"),
+    ]
+    fig.legend(handles=handles, labels=[h.get_label() for h in handles],
+               loc="lower right", bbox_to_anchor=(0.99, 0.01), frameon=False)
+
+    plt.tight_layout()
+    plt.show()
 
 
 # =============================================================================
-# Savings & Aggregations
+# Savings & Aggregations (unchanged core)
 # =============================================================================
 
 @dataclass
 class SavingsConfig:
-    """
-    Configuration for bill savings aggregation.
-    """
+    """Configuration for bill savings aggregation."""
     lifetime_years: int = 25
     cap_to_horizon: bool = False
 
@@ -516,6 +716,7 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
     if df.empty:
         return {
             "median_system_kw": pd.DataFrame(),
+            "median_storage_kwh": pd.DataFrame(),
             "totals": pd.DataFrame(),
             "tech_2040": pd.DataFrame(),
             "portfolio_annual_savings": pd.DataFrame(),
@@ -538,6 +739,17 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
         .quantile(0.5, interpolation="linear")
         .reset_index(name="median_system_kw")
     )
+
+    # Median storage size (kWh) by state/year/scenario if batt_kwh is present; ignore zeros
+    if "batt_kwh" in x.columns:
+        median_storage = (
+            x[x['batt_kwh'] > 0]
+            .groupby(["state_abbr", "year", "scenario"], observed=True)["batt_kwh"]
+            .quantile(0.5, interpolation="linear")
+            .reset_index(name="median_batt_kwh")
+        )
+    else:
+        median_storage = pd.DataFrame(columns=["state_abbr","year","scenario","median_batt_kwh"])
 
     totals = (
         x.groupby(["state_abbr", "year", "scenario"], as_index=False)
@@ -594,6 +806,7 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
              market_reached=("number_of_adopters", "sum"),
          )
     )
+    # fix typo: reference correct column
     market_share["market_share_reached"] = np.where(
         market_share["market_potential"] > 0,
         market_share["market_reached"] / market_share["market_potential"],
@@ -602,6 +815,7 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
 
     return {
         "median_system_kw": median_kw,
+        "median_storage_kwh": median_storage,
         "totals": totals,
         "tech_2040": tech_2040,
         "portfolio_annual_savings": portfolio_annual,
@@ -616,9 +830,99 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
 # Parallel processing across states
 # =============================================================================
 
+def discover_state_dirs(root_dir: str) -> List[str]:
+    """Return absolute paths of immediate subdirectories under `root_dir` (state folders)."""
+    return sorted(
+        os.path.join(root_dir, d)
+        for d in os.listdir(root_dir)
+        if os.path.isdir(os.path.join(root_dir, d))
+    )
+
+
+def find_state_files(state_dir: str, run_id: Optional[str] = None, strict_run_id: bool = True) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Locate per-state CSVs for baseline and policy.
+
+    If run_id is provided and strict_run_id=True (default), return only files that match
+    baseline_{run_id}.csv and policy_{run_id}.csv; otherwise return (None, None) for missing.
+    If strict_run_id=False, falls back to any baseline*/policy* when both exact matches are absent.
+    """
+    if run_id:
+        b = glob.glob(os.path.join(state_dir, f"baseline_{run_id}.csv"))
+        p = glob.glob(os.path.join(state_dir, f"policy_{run_id}.csv"))
+        if strict_run_id:
+            return (b[0] if b else None), (p[0] if p else None)
+        if b and p:
+            return b[0], p[0]
+
+    # Fallback (only used when strict_run_id=False or no run_id provided)
+    b = glob.glob(os.path.join(state_dir, "baseline*.csv"))
+    p = glob.glob(os.path.join(state_dir, "policy*.csv"))
+    return (b[0] if b else None), (p[0] if p else None)
+
+
+def _read_with_selected_cols(path: str) -> pd.DataFrame:
+    """
+    Read a CSV keeping only columns present from NEEDED_COLS; missing columns are added.
+    If `scenario` or `state_abbr` is missing, they are inferred from file and directory names.
+    Robust to empty/zero-byte CSVs.
+    """
+    if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
+        return pd.DataFrame(columns=NEEDED_COLS)
+
+    try:
+        header = pd.read_csv(path, nrows=0)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame(columns=NEEDED_COLS)
+
+    present = [c for c in NEEDED_COLS if c in header.columns]
+
+    try:
+        df = pd.read_csv(path, usecols=present) if present else pd.DataFrame(columns=NEEDED_COLS)
+    except (pd.errors.EmptyDataError, ValueError):
+        return pd.DataFrame(columns=NEEDED_COLS)
+
+    # Add missing columns
+    for c in NEEDED_COLS:
+        if c not in df.columns:
+            df[c] = np.nan
+
+    # Infer scenario/state if absent
+    filename = os.path.basename(path).lower()
+    if df["scenario"].isna().all():
+        df["scenario"] = "baseline" if "baseline" in filename else ("policy" if "policy" in filename else np.nan)
+
+    if df["state_abbr"].isna().any():
+        state = os.path.basename(os.path.dirname(path)).upper()
+        df.loc[df["state_abbr"].isna(), "state_abbr"] = state
+
+    return df
+
+
 def _process_one_state(args) -> Dict[str, pd.DataFrame]:
     state_dir, run_id, cfg = args
-    df = load_state_df(state_dir, run_id)
+    df = pd.DataFrame(columns=NEEDED_COLS)
+    b_csv, p_csv = find_state_files(state_dir, run_id)
+    parts: List[pd.DataFrame] = []
+    for p in (b_csv, p_csv):
+        if p:
+            parts.append(_read_with_selected_cols(p))
+    if parts:
+        df = pd.concat(parts, ignore_index=True)
+        # Basic typing
+        for col in ("year", "new_adopters", "number_of_adopters",
+                    "first_year_elec_bill_savings", "system_kw",
+                    "system_kw_cum", "batt_kwh", "batt_kwh_cum",
+                    "customers_in_bin", "max_market_share",
+                    "avg_elec_price_cents_per_kwh"):
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        # Fill non-negative quantities
+        for col in ("new_adopters", "number_of_adopters", "first_year_elec_bill_savings",
+                    "customers_in_bin", "max_market_share",
+                    "system_kw_cum", "batt_kwh_cum"):
+            if col in df.columns:
+                df[col] = df[col].fillna(0.0)
     return aggregate_state_metrics(df, cfg)
 
 
@@ -627,31 +931,22 @@ def process_all_states(
     run_id: Optional[str] = None,
     cfg: SavingsConfig = SavingsConfig(),
     n_jobs: int = 1,
-    states: Optional[Iterable[str]] = None,   # <— NEW: optional state filter
+    states: Optional[Iterable[str]] = None,
 ) -> Dict[str, pd.DataFrame]:
     """
     Aggregate small, plot-ready DataFrames across all states.
-
-    Args:
-        root_dir: Root folder containing per-state subdirectories (e.g., 'CA', 'ny', ...).
-        run_id: If provided, only pick baseline_{run_id}.csv / policy_{run_id}.csv.
-        cfg: SavingsConfig for savings computations.
-        n_jobs: Parallel workers (processes).
-        states: Optional iterable of 2-letter state codes to include (case-insensitive).
     """
     state_dirs = discover_state_dirs(root_dir)
 
     # Optional filter by explicit state codes (case-insensitive)
     if states:
         wanted = {s.strip().upper() for s in states if s and s.strip()}
-        state_dirs = [
-            sd for sd in state_dirs
-            if os.path.basename(sd).upper() in wanted
-        ]
+        state_dirs = [sd for sd in state_dirs if os.path.basename(sd).upper() in wanted]
 
     if not state_dirs:
         return {
             "median_system_kw": pd.DataFrame(),
+            "median_storage_kwh": pd.DataFrame(),
             "totals": pd.DataFrame(),
             "tech_2040": pd.DataFrame(),
             "portfolio_annual_savings": pd.DataFrame(),
@@ -681,7 +976,7 @@ def process_all_states(
 
 
 # =============================================================================
-# Plot helpers (faceting)
+# Generic state-level faceter (unchanged)
 # =============================================================================
 
 def facet_lines_by_state(
@@ -695,8 +990,7 @@ def facet_lines_by_state(
     sharey: bool = False
 ) -> None:
     """
-    Faceted line plot by state comparing Baseline vs Policy, with end-of-horizon annotations
-    at 2040 (or the last available year in that state).
+    Faceted line plot by state comparing Baseline vs Policy, with end-of-horizon annotations.
     """
     if df.empty:
         return
@@ -718,12 +1012,13 @@ def facet_lines_by_state(
             return f"{v:.1f} kW"
         if m == "market_share_reached":
             return f"{v*100:.1f}%"
+        if m == "median_batt_kwh":
+            return f"{v:.1f} kWh"
         return f"{v:.2g}"
 
     sns.set_context("talk", rc={"lines.linewidth": 2})
     g = sns.FacetGrid(df, col="state_abbr", col_wrap=col_wrap, height=height, sharey=sharey)
 
-    # draw lines
     g.map_dataframe(sns.lineplot, x="year", y=y_col, hue="scenario", marker="o")
     g.set_titles("{col_name}")
     g.set_axis_labels("Year", ylabel)
@@ -731,11 +1026,11 @@ def facet_lines_by_state(
     g.add_legend()
     g.fig.suptitle(title, y=1.02)
 
-    # Pick the preferred annotation year globally (fall back to max available per state)
+    # Preferred annotation year globally (fallback to max available per state)
     global_years = pd.to_numeric(df["year"], errors="coerce").dropna().astype(int)
     preferred_year = 2040 if (len(global_years) and 2040 in set(global_years)) else (int(global_years.max()) if len(global_years) else None)
 
-    # annotate per facet (per state)
+    # annotate per facet
     if preferred_year is not None:
         for state, ax in g.axes_dict.items():
             sdf = df[(df["state_abbr"] == state)].copy()
@@ -743,15 +1038,12 @@ def facet_lines_by_state(
                 continue
             sdf = sdf.dropna(subset=[y_col, "year"])
 
-            # pick year for this state
             years = sdf["year"].astype(int).unique()
             end_year = preferred_year if preferred_year in years else int(sdf["year"].max())
 
-            # collect end points for each scenario present
             end_points = []
             for scen, sg in sdf.groupby("scenario"):
                 sg = sg.sort_values("year")
-                # prefer the exact year; else the latest <= end_year
                 g_end = sg[sg["year"] == end_year]
                 if g_end.empty:
                     g_end = sg[sg["year"] <= end_year].tail(1)
@@ -763,19 +1055,18 @@ def facet_lines_by_state(
             if not end_points:
                 continue
 
-            # tiny vertical jitter to avoid overlap if values are very close
             sv = sdf[y_col].to_numpy()
             vmin = float(np.nanmin(sv)) if sv.size else 0.0
             vmax = float(np.nanmax(sv)) if sv.size else 1.0
             yrange = max(1.0, vmax - vmin)
-            sep_needed = yrange * 0.01  # 1% of the local range
+            sep_needed = yrange * 0.01  # 1%
 
             used_y = []
             for scen, x_end, y_end in sorted(end_points, key=lambda t: t[2]):
                 offset_pts = 0
                 for uy in used_y:
                     if abs(y_end - uy) < sep_needed:
-                        offset_pts += 6  # nudge down a bit
+                        offset_pts += 6
                 used_y.append(y_end)
 
                 ax.annotate(
@@ -789,89 +1080,16 @@ def facet_lines_by_state(
                     fontweight="bold",
                 )
 
-            # # pad x-limits slightly to ensure labels at the right edge aren't clipped
-            # xmin, xmax = ax.get_xlim()
-            # ax.set_xlim(xmin, xmax + 0.4)
-
-    # Avoid tight_layout warnings by relying on default layout
-    plt.show()
-
-
-def bar_tech_potential_2040(tech_agg: pd.DataFrame, title: str = "Solar Technical Potential Reached in 2040") -> None:
-    """
-    Grouped bar plot of percent technical potential, sorted by policy scenario.
-    """
-    if tech_agg.empty:
-        return
-    order = (
-        tech_agg[tech_agg["scenario"] == "policy"]
-        .sort_values("percent_tech_potential", ascending=False)["state_abbr"]
-        .tolist()
-    )
-    plt.figure(figsize=(14, 6), constrained_layout=True)
-    ax = sns.barplot(
-        data=tech_agg, x="state_abbr", y="percent_tech_potential",
-        hue="scenario", order=order, errorbar=None
-    )
-    for container in ax.containers:
-        for bar in container:
-            h = bar.get_height()
-            if h > 0 and not math.isnan(h):
-                ax.text(
-                    bar.get_x() + bar.get_width() / 2,
-                    h - 1.5,
-                    f"{h:.1f}%",
-                    ha="center",
-                    va="top",
-                    color="white",
-                    fontsize=9,
-                    fontweight="bold",
-                )
-    plt.title(f"{title} (Sorted by Policy %)")
-    plt.ylabel("Percent of Technical Potential (%)")
-    plt.xlabel("State")
-    plt.xticks(rotation=45)
-    plt.ylim(0, tech_agg["percent_tech_potential"].max() * 1.1)
     plt.show()
 
 
 # =============================================================================
-# Convenience exports
-# =============================================================================
-
-__all__ = [
-    # I/O
-    "discover_state_dirs",
-    "find_state_files",
-    "load_state_df",
-    "stream_combine_two_csvs",
-
-    # Config & processing
-    "SavingsConfig",
-    "aggregate_state_metrics",
-    "compute_portfolio_and_cumulative_savings",
-    "process_all_states",
-
-    # Plotting
-    "facet_lines_by_state",
-    "bar_tech_potential_2040",
-    "find_state_hourly_file", "load_state_peaks_df", "process_all_states_peaks", "facet_peaks_by_state",
-
-    # US deltas & totals
-    "build_national_deltas",
-    "facet_lines_all_states_delta",
-    "build_national_totals",
-    "facet_lines_national_totals",
-]
-
-# =============================================================================
-# National deltas: Policy − Baseline (summed across states)
+# National deltas & totals (EXTENDED TO INCLUDE PEAKS)
 # =============================================================================
 
 def build_national_deltas(outputs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
     """
-    Return tidy national deltas: ['year','metric','value'], where
-    value = (policy − baseline).
+    Return tidy national deltas: ['year','metric','value'], value = (policy − baseline).
     """
     years_seen = []
     for k in ("totals", "portfolio_annual_savings", "cumulative_bill_savings", "market_share_reached"):
@@ -940,73 +1158,25 @@ def build_national_deltas(outputs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
     return pd.concat(pieces, ignore_index=True) if pieces else pd.DataFrame(columns=["year","metric","value"])
 
 
-def facet_lines_all_states_delta(
+def build_national_totals(
     outputs: Dict[str, pd.DataFrame],
-    metrics: Optional[Iterable[str]] = None,
-    xticks: Iterable[int] = (2026, 2030, 2035, 2040),
-    title: str = "Policy − Baseline (U.S. Totals)",
-    ncols: int = 3,
-) -> None:
-    """
-    Simple subplots for national deltas (policy − baseline). No annotations.
-    """
-    df = build_national_deltas(outputs)
-    if df.empty:
-        return
-
-    if metrics:
-        df = df[df["metric"].isin(set(metrics))]
-        if df.empty:
-            return
-
-    nice_titles = {
-        "number_of_adopters": "Δ Cumulative Adopters",
-        "system_kw_cum": "Δ Cumulative PV (kW)",
-        "batt_kwh_cum": "Δ Cumulative Storage (kWh)",
-        "portfolio_annual_savings": "Δ Portfolio Bill Savings ($/yr)",
-        "cumulative_bill_savings": "Δ Cumulative Bill Savings ($)",
-    }
-
-    metric_list = list(df["metric"].unique())
-    n = len(metric_list)
-    ncols = max(1, min(ncols, n))
-    nrows = int(math.ceil(n / ncols))
-
-    fig, axes = plt.subplots(nrows, ncols, figsize=(6*ncols, 3.3*nrows), constrained_layout=True)
-    axes = np.atleast_1d(axes).ravel()
-
-    for i, m in enumerate(metric_list):
-        ax = axes[i]
-        d = df[df["metric"] == m].sort_values("year")
-        ax.plot(d["year"], d["value"], marker="o")
-        ax.axhline(0.0, linestyle="--", linewidth=1)
-        ax.set_xticks(list(xticks))
-        ax.set_title(nice_titles.get(m, m))
-        ax.set_xlabel("Year")
-        ax.set_ylabel("Policy − Baseline")
-
-    # Hide any extra axes
-    for j in range(i+1, len(axes)):
-        axes[j].set_visible(False)
-
-    fig.suptitle(title, y=1.05)
-    plt.show()
-
-
-# =============================================================================
-# National totals: Baseline vs Policy (summed across states)
-# =============================================================================
-
-def build_national_totals(outputs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    peaks_df: Optional[pd.DataFrame] = None,   # NEW: optionally include peak_mw series
+) -> pd.DataFrame:
     """
     Build tidy national totals across states, per scenario:
         ['year', 'scenario', 'metric', 'value']
+
+    If peaks_df is provided (columns: state_abbr, scenario, year, peak_mw),
+    we add a metric 'peak_mw' to the national totals.
     """
     years_seen = []
     for k in ("totals", "portfolio_annual_savings", "cumulative_bill_savings"):
         dfk = outputs.get(k, pd.DataFrame())
         if not dfk.empty and "year" in dfk.columns:
             years_seen.append(dfk["year"])
+    if peaks_df is not None and not peaks_df.empty:
+        years_seen.append(peaks_df["year"])
+
     if not years_seen:
         return pd.DataFrame(columns=["year", "scenario", "metric", "value"])
 
@@ -1059,21 +1229,32 @@ def build_national_totals(outputs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
             s["metric"] = "portfolio_annual_savings"
             pieces.append(s)
 
+    # NEW: include national peak_mw totals (sum of state peaks by year/scenario)
+    if peaks_df is not None and not peaks_df.empty:
+        if set(["state_abbr","scenario","year","peak_mw"]).issubset(peaks_df.columns):
+            s = _sum_series(peaks_df[["state_abbr","year","scenario","peak_mw"]].copy(),
+                            "peak_mw", cumulative=False)
+            if not s.empty:
+                s["metric"] = "peak_mw"
+                pieces.append(s)
+
     return pd.concat(pieces, ignore_index=True) if pieces else pd.DataFrame(columns=["year", "scenario", "metric", "value"])
 
 
 def facet_lines_national_totals(
     outputs: Dict[str, pd.DataFrame],
-    metrics: Optional[Iterable[str]] = ("number_of_adopters", "system_kw_cum", "batt_kwh_cum", "cumulative_bill_savings"),
+    peaks_df: Optional[pd.DataFrame] = None,   # NEW: pass peaks here to include 'peak_mw'
+    metrics: Optional[Iterable[str]] = ("number_of_adopters", "system_kw_cum", "batt_kwh_cum", "cumulative_bill_savings", "peak_mw"),
     xticks: Iterable[int] = (2026, 2030, 2035, 2040),
     title: str = "U.S. Totals: Baseline vs Policy",
     ncols: int = 3,
 ) -> None:
     """
-    Subplots for national totals (Baseline vs Policy) with annotations at 2040.
-    If 2040 is not available, annotate the last available year.
+    Subplots for national totals (Baseline vs Policy) with annotations.
+    If peaks_df is provided, includes 'peak_mw' in the facet set so U.S. peaks appear
+    alongside the other U.S. totals as requested.
     """
-    nat = build_national_totals(outputs)
+    nat = build_national_totals(outputs, peaks_df=peaks_df)
     if nat.empty:
         return
 
@@ -1088,6 +1269,7 @@ def facet_lines_national_totals(
         "batt_kwh_cum": "Cumulative Storage (kWh)",
         "cumulative_bill_savings": "Cumulative Bill Savings ($)",
         "portfolio_annual_savings": "Portfolio Bill Savings ($/yr)",
+        "peak_mw": "U.S. Peak Demand (MW)",   # NEW
     }
 
     # Formatting helper for end-of-horizon labels
@@ -1095,16 +1277,14 @@ def facet_lines_national_totals(
         if metric == "number_of_adopters":
             return f"{v/1e6:.1f}M"
         if metric == "system_kw_cum":
-            # kW -> GW
-            return f"{v/1e6:.1f} GW"
+            return f"{v/1e6:.1f} GW"         # kW -> GW
         if metric == "batt_kwh_cum":
-            # kWh -> GWh
-            return f"{v/1e6:.1f} GWh"
+            return f"{v/1e6:.1f} GWh"        # kWh -> GWh
         if metric == "cumulative_bill_savings":
             return f"${v/1e9:.1f}B"
-        if metric == "portfolio_annual_savings":
-            return f"${v/1e9:.1f}B/yr"
-        # fallback with 2 sig figs
+        if metric == "peak_mw":
+            return f"{v/1e3:.1f} GW"         # MW -> GW
+        # portfolio_annual_savings shown raw:
         return f"{v:.2g}"
 
     metric_list = list(nat["metric"].unique())
@@ -1141,15 +1321,13 @@ def facet_lines_national_totals(
         ax.set_ylabel("U.S. Total")
         ax.legend(frameon=False, loc="best")
 
-        # Annotations: offset to avoid overlap if values are very close
+        # Annotations: small vertical jitter to avoid overlap
         if end_points:
-            # Compute a tiny vertical jitter if two labels are nearly identical
             ys = np.array([p[2] for p in end_points])
             yrange = max(1.0, float(d["value"].max() - d["value"].min()) or 1.0)
-            sep_needed = yrange * 0.01  # 1% of range
+            sep_needed = yrange * 0.01
             used_offsets = {}
             for scen, x_end, y_end in sorted(end_points, key=lambda t: t[2]):
-                # If another label is within sep_needed, nudge this one
                 offset_pts = 0
                 for other_y in used_offsets.keys():
                     if abs(y_end - other_y) < sep_needed:
@@ -1174,3 +1352,147 @@ def facet_lines_national_totals(
     fig.suptitle(title, y=1.05)
     plt.show()
 
+
+# =============================================================================
+# Other plots
+# =============================================================================
+
+def facet_median_storage_by_state(
+    outputs: Dict[str, pd.DataFrame],
+    xticks: Iterable[int] = (2026, 2030, 2035, 2040),
+    height: float = 3.5,
+    col_wrap: int = 4,
+    sharey: bool = False,
+    title: str = "Median Storage Size (kWh) — Baseline vs Policy",
+) -> None:
+    """
+    Faceted line plot of per-state median storage size (kWh) by scenario.
+    Requires outputs['median_storage_kwh'] produced by aggregate_state_metrics.
+    """
+    df = outputs.get("median_storage_kwh", pd.DataFrame())
+    if df is None or df.empty:
+        return
+
+    d = df.rename(columns={"median_batt_kwh": "value"}).copy()
+    d = d.dropna(subset=["value"])
+
+    sns.set_context("talk", rc={"lines.linewidth": 2})
+    g = sns.FacetGrid(d, col="state_abbr", col_wrap=col_wrap, height=height, sharey=sharey)
+    g.map_dataframe(sns.lineplot, x="year", y="value", hue="scenario", marker="o")
+    g.set_titles("{col_name}")
+    g.set_axis_labels("Year", "Median Storage Size (kWh)")
+    g.set(xticks=list(xticks))
+    g.add_legend()
+    g.fig.suptitle(title, y=1.02)
+
+    # annotate like the others
+    global_years = pd.to_numeric(d["year"], errors="coerce").dropna().astype(int)
+    preferred_year = 2040 if (len(global_years) and 2040 in set(global_years)) else (int(global_years.max()) if len(global_years) else None)
+    if preferred_year is not None:
+        for state, ax in g.axes_dict.items():
+            sdf = d[(d["state_abbr"] == state)].dropna(subset=["value","year"])
+            if sdf.empty:
+                continue
+            years = sdf["year"].astype(int).unique()
+            end_year = preferred_year if preferred_year in years else int(sdf["year"].max())
+
+            end_points = []
+            for scen, sg in sdf.groupby("scenario"):
+                sg = sg.sort_values("year")
+                g_end = sg[sg["year"] == end_year]
+                if g_end.empty:
+                    g_end = sg[sg["year"] <= end_year].tail(1)
+                if not g_end.empty:
+                    end_points.append((scen, float(g_end["year"].iloc[-1]), float(g_end["value"].iloc[-1])))
+
+            if not end_points:
+                continue
+
+            vals = np.array([p[2] for p in end_points])
+            yrange = max(1.0, float(vals.max() - vals.min()) or 1.0)
+            sep = yrange * 0.01
+            used = []
+            for scen, x_end, y_end in sorted(end_points, key=lambda t: t[2]):
+                offset = 0
+                for u in used:
+                    if abs(y_end - u) < sep:
+                        offset += 6
+                used.append(y_end)
+                ax.annotate(f"{y_end:.1f} kWh", xy=(x_end, y_end),
+                            xytext=(6, offset), textcoords="offset points",
+                            ha="left", va="center", fontsize=9, fontweight="bold")
+    plt.show()
+
+
+def bar_tech_potential_2040(tech_agg: pd.DataFrame, title: str = "Solar Technical Potential Reached in 2040") -> None:
+    """
+    Grouped bar plot of percent technical potential, sorted by policy scenario.
+    """
+    if tech_agg.empty:
+        return
+    order = (
+        tech_agg[tech_agg["scenario"] == "policy"]
+        .sort_values("percent_tech_potential", ascending=False)["state_abbr"]
+        .tolist()
+    )
+    plt.figure(figsize=(14, 6), constrained_layout=True)
+    ax = sns.barplot(
+        data=tech_agg, x="state_abbr", y="percent_tech_potential",
+        hue="scenario", order=order, errorbar=None
+    )
+    for container in ax.containers:
+        for bar in container:
+            h = bar.get_height()
+            if h > 0 and not math.isnan(h):
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    h - 1.5,
+                    f"{h:.1f}%",
+                    ha="center",
+                    va="top",
+                    color="white",
+                    fontsize=9,
+                    fontweight="bold",
+                )
+    plt.title(f"{title} (Sorted by Policy %)")
+    plt.ylabel("Percent of Technical Potential (%)")
+    plt.xlabel("State")
+    plt.xticks(rotation=45)
+    plt.ylim(0, tech_agg["percent_tech_potential"].max() * 1.1)
+    plt.show()
+
+
+# =============================================================================
+# Convenience exports
+# =============================================================================
+
+__all__ = [
+    # I/O & discovery
+    "discover_state_dirs",
+    "find_state_files",
+    "load_state_peaks_df",
+    "process_all_states_peaks",
+
+    # Hourly plotting helpers
+    "plot_state_netload",
+    "facet_state_peak_timeseries_from_hourly",
+
+    # Config & processing
+    "SavingsConfig",
+    "aggregate_state_metrics",
+    "compute_portfolio_and_cumulative_savings",
+    "process_all_states",
+
+    # State plots
+    "facet_lines_by_state",
+    "facet_peaks_by_state",
+    "facet_median_storage_by_state",
+
+    # National
+    "build_national_deltas",
+    "build_national_totals",
+    "facet_lines_national_totals",
+
+    # Other
+    "bar_tech_potential_2040",
+]
