@@ -476,12 +476,7 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
             else:
                 out.append(a[:n])
         return out
-    
-    if npv_w >= npv_n:
-        print(f"[{agent.loc['agent_id']}] -- TRUE")
-    else:
-        print(f"[{agent.loc['agent_id']}] -- FALSE")
-        
+
     if npv_w >= npv_n:
         # battery wins (PV fixed at pv_star)
         system_kw     = float(pv_star)
