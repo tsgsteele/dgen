@@ -35,7 +35,7 @@ import PySAM.Pvwattsv8 as pvwattsv8
 SKIP_DEMAND_CHARGES = True
 
 # Force net billing
-FORCE_NET_BILLING = False
+FORCE_NET_BILLING = True
 
 #==============================================================================
 # Logger
@@ -103,7 +103,9 @@ def calc_system_performance(
     agent: pd.Series,
     rate_switch_table: Optional[pd.DataFrame],
     en_batt: bool = True,
-    batt_dispatch: str = 'price_signal_forecast'
+    batt_dispatch: str = 'price_signal_forecast',
+    batt_kwh: Optional[float] = None,          # <---- NEW
+    batt_power_kw: Optional[float] = None      # <---- NEW
 ):
     """
     Objective function for scalar search on PV kW (battery sized internally).
@@ -137,13 +139,19 @@ def calc_system_performance(
         batt.BatterySystem.batt_replacement_option = 0
         batt.batt_minimum_SOC = 10
 
-        pv_to_batt_ratio = 1
-        batt_capacity_to_power_ratio = 2.0
-        desired_size  = 8
-        desired_power = desired_size / batt_capacity_to_power_ratio
+        # --- SIZE BATTERY (MINIMAL CHANGE) ---
+        # Keep the original defaults as fallbacks
+        _default_capacity_to_power_ratio = 2.0
+        _default_kwh   = 8.0
+        _kwh = float(batt_kwh) if batt_kwh is not None else _default_kwh
+        if batt_power_kw is not None:
+            _kw = float(batt_power_kw)
+        else:
+            _kw = _kwh / _default_capacity_to_power_ratio
+
         desired_voltage = 500 if agent.loc['sector_abbr'] != 'res' else 240
         battery_tools.battery_model_sizing(
-            batt, desired_power, desired_size, desired_voltage=desired_voltage, tol=1e38
+            batt, _kw, _kwh, desired_voltage=desired_voltage, tol=1e38
         )
 
         batt.Load.load = load_hourly
@@ -248,14 +256,14 @@ def calc_system_performance(
     utilityrate.execute()
 
     # ---- Financials ----
-    loan = process_incentives(
-        loan,
-        kw,
-        batt.BatterySystem.batt_power_discharge_max_kwdc,
-        batt.Outputs.batt_bank_installed_capacity,
-        gen_hourly,
-        agent
-    )
+    # loan = process_incentives(
+    #     loan,
+    #     kw,
+    #     batt.BatterySystem.batt_power_discharge_max_kwdc,
+    #     batt.Outputs.batt_bank_installed_capacity,
+    #     gen_hourly,
+    #     agent
+    # )
     loan.FinancialParameters.system_capacity = kw
 
     aev = list(utilityrate.Outputs.annual_energy_value)
@@ -393,9 +401,10 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     low        = max_system * 0.8
     high       = max_system * 1.25
 
-    def perf_with_batt(x):
+    def perf_with_batt(x, _batt_kwh=None, _batt_kw=None):
         return calc_system_performance(
-            x, pv, utilityrate, loan, batt, sc, agent, rate_switch_table, True, batt_disp
+            x, pv, utilityrate, loan, batt, sc, agent, rate_switch_table,
+            True, batt_disp, batt_kwh=_batt_kwh, batt_power_kw=_batt_kw
         )
 
     def perf_no_batt(x):
@@ -403,30 +412,7 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
             x, pv, utilityrate, loan, batt, sc, agent, rate_switch_table, False, 0
         )
 
-    # --- Run with battery, capture arrays ---
-    res_w = optimize.minimize_scalar(
-        perf_with_batt,
-        bounds=(low, high),
-        method='bounded',
-        options={'xatol': max(2, tol)}
-    )
-    out_w_loan = loan.Outputs.export()
-    out_w_util = utilityrate.Outputs.export()
-    gen_w_annual = float(np.nansum(np.asarray(getattr(utilityrate.SystemOutput, "gen", []), dtype=float)))
-    kw_w         = getattr(batt.BatterySystem, "batt_power_discharge_max_kwdc", 0.0)
-    kwh_w        = getattr(batt.Outputs, "batt_bank_installed_capacity", 0.0)
-
-    load_w_ts = np.asarray(getattr(utilityrate.Load, "load", []), dtype=float)
-    # Prefer PV->load; fallback to PV generation; clip to load to avoid negatives
-    _pv_w_raw = getattr(utilityrate.Outputs, "year1_hourly_system_to_load", None)
-    if _pv_w_raw is None or (hasattr(_pv_w_raw, "__len__") and len(_pv_w_raw) == 0):
-        _pv_w_raw = getattr(utilityrate.SystemOutput, "gen", [])
-    pv_w_ts  = np.asarray(_pv_w_raw, dtype=float)
-    btl_w_ts = np.asarray(getattr(batt.Outputs, "batt_to_load", []), dtype=float)
-    gtb_w_ts = np.asarray(getattr(batt.Outputs, "grid_to_batt", []), dtype=float)
-    npv_w    = out_w_loan.get("npv", float("-inf"))
-
-    # --- Run without battery, capture arrays ---
+    # --- 1) Optimize PV WITHOUT battery to get P* ---
     res_n = optimize.minimize_scalar(
         perf_no_batt,
         bounds=(low, high),
@@ -436,16 +422,46 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     out_n_loan   = loan.Outputs.export()
     out_n_util   = utilityrate.Outputs.export()
     gen_n_annual = float(np.nansum(np.asarray(getattr(utilityrate.SystemOutput, "gen", []), dtype=float)))
-
-    load_n_ts = np.asarray(getattr(utilityrate.Load, "load", []), dtype=float)
-    _pv_n_raw = getattr(utilityrate.Outputs, "year1_hourly_system_to_load", None)
+    load_n_ts    = np.asarray(getattr(utilityrate.Load, "load", []), dtype=float)
+    _pv_n_raw    = getattr(utilityrate.Outputs, "year1_hourly_system_to_load", None)
     if _pv_n_raw is None or (hasattr(_pv_n_raw, "__len__") and len(_pv_n_raw) == 0):
         _pv_n_raw = getattr(utilityrate.SystemOutput, "gen", [])
     pv_n_ts  = np.asarray(_pv_n_raw, dtype=float)
     npv_n    = out_n_loan.get("npv", float("-inf"))
 
-    optimize_time = time.time() - t_opt
+    # --- 2) HOLD PV=P* and SWEEP a few battery sizes; pick max-NPV ---
+    pv_star = float(res_n.x)
+    hours_candidates = [0.5, 1.0, 2.0, 3.0, 4.0]   # hours of storage per kW of PV (tweak as desired)
+    c_rate_hours     = 2.0                         # i.e., power = kWh / 2h  (keeps your 2.0 ratio)
+    best_batt = {'npv': float('-inf'), 'kwh': 0.0, 'kw': 0.0}
 
+    for h in hours_candidates:
+        kwh = h * pv_star
+        kwp = kwh / c_rate_hours
+        neg_npv = perf_with_batt(pv_star, _batt_kwh=kwh, _batt_kw=kwp)
+        npv = -neg_npv
+        if npv > best_batt['npv']:
+            best_batt.update({'npv': npv, 'kwh': kwh, 'kw': kwp})
+
+    # Re-run the best battery case once to populate Outputs for downstream code
+    if best_batt['npv'] > float('-inf') and best_batt['kwh'] > 0:
+        _ = perf_with_batt(pv_star, _batt_kwh=best_batt['kwh'], _batt_kw=best_batt['kw'])
+        out_b_loan = loan.Outputs.export()
+        out_b_util = utilityrate.Outputs.export()
+        gen_w_annual = float(np.nansum(np.asarray(getattr(utilityrate.SystemOutput, "gen", []), dtype=float)))
+        kw_w   = float(getattr(batt.BatterySystem, "batt_power_discharge_max_kwdc", 0.0))
+        kwh_w  = float(getattr(batt.Outputs, "batt_bank_installed_capacity", 0.0))
+        load_w_ts = np.asarray(getattr(utilityrate.Load, "load", []), dtype=float)
+        _pv_w_raw = getattr(utilityrate.Outputs, "year1_hourly_system_to_load", None)
+        if _pv_w_raw is None or (hasattr(_pv_w_raw, "__len__") and len(_pv_w_raw) == 0):
+            _pv_w_raw = getattr(utilityrate.SystemOutput, "gen", [])
+        pv_w_ts  = np.asarray(_pv_w_raw, dtype=float)
+        npv_w    = out_b_loan.get("npv", float("-inf"))
+    else:
+        # No feasible battery or it never improved NPV
+        npv_w = float('-inf')
+
+    optimize_time = time.time() - t_opt
     # --- Choose winning case and set scalars + arrays consistently ---
     def _align_to_n(*arrays):
         sizes = [a.size for a in arrays if isinstance(a, np.ndarray)]
@@ -460,25 +476,30 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
             else:
                 out.append(a[:n])
         return out
-
+    
     if npv_w >= npv_n:
-        # with battery wins
-        system_kw     = float(res_w.x)
+        print(f"[{agent.loc['agent_id']}] -- TRUE")
+    else:
+        print(f"[{agent.loc['agent_id']}] -- FALSE")
+        
+    if npv_w >= npv_n:
+        # battery wins (PV fixed at pv_star)
+        system_kw     = float(pv_star)
         annual_kwh    = gen_w_annual
-        first_with    = out_w_util.get('utility_bill_w_sys_year1', 0.0)
-        first_without = out_w_util.get('utility_bill_wo_sys_year1', 0.0)
+        first_with    = out_b_util.get('utility_bill_w_sys_year1', 0.0)
+        first_without = out_b_util.get('utility_bill_wo_sys_year1', 0.0)
         npv_final     = npv_w
-        cash_flow     = list(out_w_loan.get('cf_payback_with_expenses', []))
-        payback       = out_w_loan.get('payback', None)
+        cash_flow     = list(out_b_loan.get('cf_payback_with_expenses', []))
+        payback       = out_b_loan.get('payback', None)
         batt_kw       = kw_w
         batt_kwh      = kwh_w
-        cbi           = out_w_loan.get('cbi_total', 0.0)
-        ibi           = out_w_loan.get('ibi_total', 0.0)
-        pbi           = out_w_loan.get('cf_pbi_total', 0.0)
+        cbi           = out_b_loan.get('cbi_total', 0.0)
+        ibi           = out_b_loan.get('ibi_total', 0.0)
+        pbi           = out_b_loan.get('cf_pbi_total', 0.0)
 
         load_ts, pv_ts = _align_to_n(load_w_ts, pv_w_ts)
     else:
-        # no battery wins
+        # PV-only wins (unchanged)
         system_kw     = float(res_n.x)
         annual_kwh    = gen_n_annual
         first_with    = out_n_util.get('utility_bill_w_sys_year1', 0.0)
