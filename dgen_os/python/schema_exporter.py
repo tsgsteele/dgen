@@ -103,7 +103,8 @@ def export_one_schema(
         "generation_hourly_list",
         "batt_dispatch_profile_list",
         "baseline_net_hourly",
-        "adopter_net_hourly"
+        "adopter_net_hourly",
+        "adopter_batt_hourly"
     }
     exclude_regex = os.getenv("EXPORT_EXCLUDE_REGEX", r"(?:_hourly_|_ndarray$|_profile_list$|_list$)")
     exclude_re = re.compile(exclude_regex, re.IGNORECASE)
