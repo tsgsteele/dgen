@@ -1,4 +1,4 @@
-# analysis_functions.py
+# analysis_functions.py (drop-in)
 from __future__ import annotations
 
 import os
@@ -21,6 +21,7 @@ import matplotlib.pyplot as plt
 # =============================================================================
 
 # Columns expected in per-state CSVs. Missing columns are added as NaN/0 where appropriate.
+# Columns expected in per-state CSVs. Missing columns are added as NaN/0 where appropriate.
 NEEDED_COLS = [
     "state_abbr",
     "scenario",
@@ -39,11 +40,15 @@ NEEDED_COLS = [
     "max_market_share",
 
     # PV / storage:
-    "system_kw",
+    "system_kw",              # per-adopter PV size (kW) — used for medians
+    "new_system_kw",          # **cohort total PV capacity (kW)** — used for attachment math
     "system_kw_cum",
-    "batt_kwh",        # per-agent storage size for median calc (if absent, we add as NaN)
+    "batt_kwh",               # per-agent storage size for median calc (if absent, we add NaN)
     "batt_kwh_cum",
 ]
+
+# Optional columns we will read if present (for initial stock)
+OPTIONAL_COLS = ["initial_batt_kwh", "initial_number_of_adopters"]
 
 SCHEMA_RE = re.compile(r"^diffusion_results_(baseline|policy)_([a-z]{2})_", re.IGNORECASE)
 
@@ -428,7 +433,7 @@ def facet_peaks_by_state(
 
 
 # =============================================================================
-# NEW: Facet — state-level daily/weekly peak time series (one year)
+# Facet — state-level daily/weekly peak time series (one year)
 # =============================================================================
 
 def facet_state_peak_timeseries_from_hourly(
@@ -436,17 +441,25 @@ def facet_state_peak_timeseries_from_hourly(
     run_id: Optional[str] = None,
     year: int = 2040,
     height: float = 2.8,
-    col_wrap: int = 5,
-    sharey: bool = False,
+    col_wrap: int = 4,         # 4 per row as requested
+    sharey: bool = False,       # improves comparability across states
     title: Optional[str] = None,
     states: Optional[Iterable[str]] = None,
 ) -> None:
     """
     Faceted per-state WEEKLY peak net load for a single year (Baseline vs Policy).
 
-    - Lines: solid for both scenarios.
-    - Annotations: peak value (GW) for both scenarios, black text, '(policy)' / '(baseline)'.
-    - X-axis ticks: weeks 1, 25, 52.
+    Changes from prior version:
+      - 4 states per row (col_wrap=4).
+      - Only one y-axis label per row (far-left facet).
+      - Baseline plotted ON TOP of policy (higher z-order).
+      - Peak values for baseline & policy shown in a fixed position
+        (top-right of each facet), not at the peak location. Baseline listed first.
+
+    Visual details:
+      - x ticks: weeks 1, 25, 52
+      - small annotation text with light white box
+      - compact legend (baseline first)
     """
     # ---- discover/load states ----
     state_dirs = discover_state_dirs(root_dir)
@@ -516,7 +529,7 @@ def facet_state_peak_timeseries_from_hourly(
         return
     df_pairs = pd.concat(rows, ignore_index=True)
 
-    # ---- weekly peaks (MW) + week numbers ----
+    # ---- weekly peaks (MW) + ISO week numbers ----
     def _weekly_max(arr: List[float]) -> pd.Series:
         s = pd.Series(arr, index=pd.date_range(f"{year}-01-01", periods=len(arr), freq="h"))
         wk = s.resample("W").max()
@@ -537,77 +550,177 @@ def facet_state_peak_timeseries_from_hourly(
     d = pd.concat(pieces, ignore_index=True)
 
     # ---- facets ----
-    sns.set_context("talk", rc={"lines.linewidth": 1})
+    sns.set_context("talk", rc={"lines.linewidth": 1.6})
     states_order = sorted(d["state_abbr"].unique())
     n = len(states_order)
     ncols = col_wrap
     nrows = int(math.ceil(n / ncols))
-    fig, axes = plt.subplots(nrows, ncols, figsize=(3.4*ncols, height*nrows), sharey=sharey)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(3.6*ncols, height*nrows), sharex=True, sharey=sharey)
     axes = np.atleast_1d(axes).ravel()
 
+    # Colors and draw order (baseline on top)
     pal = sns.color_palette()
     color_baseline = pal[0]  # blue
     color_policy   = pal[1]  # orange
+    draw_order = ("policy", "baseline")  # draw policy first, then baseline on top
+    zorders = {"policy": 2, "baseline": 3}
 
-    for ax, state in zip(axes, states_order):
+    for idx, (ax, state) in enumerate(zip(axes, states_order)):
         sub = d[d["state_abbr"] == state]
         pol = sub[sub["scenario"] == "policy"].sort_values("week")
         bas = sub[sub["scenario"] == "baseline"].sort_values("week")
 
-        # solid lines for both
+        # Plot lines (policy first, baseline second so baseline sits on top)
         if not pol.empty:
-            ax.plot(pol["week"], pol["peak_mw"], color=color_policy, linewidth=2, label="policy", zorder=1)
+            ax.plot(pol["week"], pol["peak_mw"], color=color_policy, linewidth=2.0, label="policy", zorder=zorders["policy"])
         if not bas.empty:
-            ax.plot(bas["week"], bas["peak_mw"], color=color_baseline, linewidth=2, label="baseline", zorder=2)
+            ax.plot(bas["week"], bas["peak_mw"], color=color_baseline, linewidth=2.0, label="baseline", zorder=zorders["baseline"])
 
-        # annotate peaks (in GW), small black text; offset to avoid overlap
-        fs = 7  # small font for tight facets
-        if not bas.empty:
-            b_idx = int(bas["peak_mw"].idxmax())
-            b_wk  = int(bas.loc[b_idx, "week"])
-            b_val = float(bas.loc[b_idx, "peak_mw"])
-            # nudge baseline label slightly below to reduce collision with policy label
-            ax.annotate(f"{b_val/1000:.1f} GW (baseline)",
-                        xy=(b_wk, b_val), xytext=(0, -10),
-                        textcoords="offset points", ha="center", va="top",
-                        fontsize=fs, color="black")
-        if not pol.empty:
-            p_idx = int(pol["peak_mw"].idxmax())
-            p_wk  = int(pol.loc[p_idx, "week"])
-            p_val = float(pol.loc[p_idx, "peak_mw"])
-            ax.annotate(f"{p_val/1000:.1f} GW (policy)",
-                        xy=(p_wk, p_val), xytext=(0, 8),
-                        textcoords="offset points", ha="center", va="bottom",
-                        fontsize=fs, color="black")
-
-        ax.set_title(state)
+        # Title and axes
+        ax.set_title(state, fontsize=10, pad=8)
         ax.set_xlim(1, 53)
-        ax.set_xticks([1, 25, 52])     # sparse ticks as requested
-        ax.set_xlabel("Week of Year")
-        ax.set_ylabel("Weekly Peak (MW)")
+        ax.set_xticks([1, 25, 52])
+        if idx % ncols == 0:
+            ax.set_ylabel("Weekly Peak (MW)")  # only far-left facets get y label
+        else:
+            ax.set_ylabel(None)
+
+        # Bottom row shows x label
+        if idx >= 44:
+            ax.set_xlabel("Week of Year")
+
         ax.grid(True, axis="y", alpha=0.25)
 
-    # hide any extra axes
+        # --- Fixed-position annotation of max values (top-right), baseline first ---
+        # (values shown in GW with 1 decimal)
+        base_peak = bas["peak_mw"].max() if not bas.empty else np.nan
+        pol_peak  = pol["peak_mw"].max() if not pol.empty else np.nan
+        lines = []
+        if np.isfinite(base_peak):
+            lines.append(f"baseline: {base_peak/1000:.1f} GW")
+        if np.isfinite(pol_peak):
+            lines.append(f"policy:   {pol_peak/1000:.1f} GW")
+        if lines:
+            ax.text(
+                0.98, 0.98, "\n".join(lines),
+                transform=ax.transAxes, ha="right", va="top",
+                fontsize=8, color="black",
+                bbox=dict(boxstyle="round,pad=0.25", facecolor="white", alpha=0.85, linewidth=0.0),
+                zorder=10,
+            )
+
+    # Hide any unused axes
     for ax in axes[len(states_order):]:
         ax.set_visible(False)
 
-    fig.suptitle(title or f"Weekly Peak Net Load — Baseline vs Policy ({year})", y=1.02)
-
-    # compact shared legend
+    # Legend (baseline first) in a consistent spot
     from matplotlib.lines import Line2D
     handles = [
-        Line2D([0], [0], color=color_baseline, linewidth=2, linestyle="-", label="baseline"),
-        Line2D([0], [0], color=color_policy,   linewidth=2, linestyle="-", label="policy"),
+        Line2D([0], [0], color=color_baseline, linewidth=2, label="baseline"),
+        Line2D([0], [0], color=color_policy,   linewidth=2, label="policy"),
     ]
-    fig.legend(handles=handles, labels=[h.get_label() for h in handles],
-               loc="lower right", bbox_to_anchor=(0.99, 0.01), frameon=False)
+    fig.legend(handles=handles, loc="lower right", ncol=2, frameon=False)
 
-    plt.tight_layout()
+    fig.suptitle(title or f"Weekly Peak Net Load — Baseline vs Policy ({year})", y=0.995, fontsize=14)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.98])
     plt.show()
 
 
+# -----------------------------------------------------------------------------
+# Attachment-rate CSV → weighted per-state rates (cached)
+# -----------------------------------------------------------------------------
+_ATTACHMENT_RATES_CACHE: Optional[Dict[str, float]] = None
+
+def _load_weighted_attachment_rates(csv_path: str = "../../../data/ohm_attachment_rates.csv") -> pd.DataFrame:
+    """
+    Input CSV columns:
+      state_abbr, metric ∈ {'attachment_rate','install_volume'}, q2_24, q3_24, q4_24, q1_25
+
+    Returns:
+      DataFrame with ['state_abbr','attach_rate_weighted'] where attachment_rate is
+      install-volume weighted across the four quarters.
+
+    Normalization details:
+      - 'attachment_rate' values may be in %, strings with '%', or proportions.
+      - We parse, strip '%', and if value > 1 we treat it as percent and divide by 100.
+      - We clamp to [0, 1] to avoid outliers.
+    """
+    qcols = ["q2_24", "q3_24", "q4_24", "q1_25"]
+    df = pd.read_csv(csv_path, dtype={"state_abbr": "string", "metric": "string"})
+
+    # long format
+    long = df.melt(
+        id_vars=["state_abbr", "metric"],
+        value_vars=qcols,
+        var_name="quarter",
+        value_name="value",
+    )
+
+    # clean
+    long["state_abbr"] = long["state_abbr"].str.strip().str.upper()
+    long["metric"] = long["metric"].str.strip().str.lower()
+    # convert value: strip % and commas, then numeric
+    long["value"] = (
+        long["value"]
+        .astype(str)
+        .str.replace("%", "", regex=False)
+        .str.replace(",", "", regex=False)
+    )
+    long["value"] = pd.to_numeric(long["value"], errors="coerce")
+
+    # pivot back: columns 'attachment_rate' and 'install_volume'
+    piv = long.pivot_table(
+        index=["state_abbr", "quarter"],
+        columns="metric",
+        values="value",
+        aggfunc="first",
+    ).reset_index()
+
+    # normalize rates: if >1 treat as percent -> proportion
+    if "attachment_rate" in piv.columns:
+        ar = pd.to_numeric(piv["attachment_rate"], errors="coerce")
+        ar = np.where(ar > 1, ar / 100.0, ar)
+        ar = np.clip(ar, 0.0, 1.0)
+        piv["attachment_rate"] = ar
+    else:
+        piv["attachment_rate"] = 0.0
+
+    if "install_volume" not in piv.columns:
+        piv["install_volume"] = 0.0
+    piv["install_volume"] = pd.to_numeric(piv["install_volume"], errors="coerce").fillna(0.0)
+
+    def _weighted(g: pd.DataFrame) -> float:
+        w = g["install_volume"].to_numpy()
+        v = g["attachment_rate"].to_numpy()
+        wsum = float(np.nansum(w))
+        if wsum > 0:
+            return float(np.average(v, weights=w))
+        # fallback to simple mean if no volume
+        return float(np.nanmean(v)) if np.isfinite(np.nanmean(v)) else 0.0
+
+    out = (
+        piv.groupby("state_abbr", as_index=False)
+           .apply(lambda g: pd.Series({"attach_rate_weighted": _weighted(g)}))
+           .reset_index(drop=True)
+    )
+    return out
+
+def _get_attachment_rates_map(csv_path: str = "../../../data/ohm_attachment_rates.csv") -> Dict[str, float]:
+    """
+    Cache and return: {STATE_ABBR -> weighted attachment rate (0..1)}.
+    """
+    global _ATTACHMENT_RATES_CACHE
+    if _ATTACHMENT_RATES_CACHE is None:
+        try:
+            df = _load_weighted_attachment_rates(csv_path)
+            _ATTACHMENT_RATES_CACHE = dict(zip(df["state_abbr"], df["attach_rate_weighted"]))
+        except Exception:
+            _ATTACHMENT_RATES_CACHE = {}
+    return _ATTACHMENT_RATES_CACHE
+
+
 # =============================================================================
-# Savings & Aggregations (unchanged core)
+# Savings & Aggregations
 # =============================================================================
 
 @dataclass
@@ -711,7 +824,26 @@ def compute_portfolio_and_cumulative_savings(
 
 def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, pd.DataFrame]:
     """
-    Aggregate per-state metrics into compact frames for plotting and export.
+    Aggregate per-state metrics for plotting and exports.
+
+    Storage (attachment-based) logic:
+      - Annual additions (kWh) for a state/year/scenario:
+            annual_add_kwh = attach_rate[state] * cohort_pv_kw
+        where cohort_pv_kw is the **cohort-total PV** in kW for that year.
+        We prefer the provided `new_system_kw` column (already a cohort total).
+        If it is missing or zero after loading/merges, we fall back to
+            cohort_pv_kw = system_kw * new_adopters
+        computed row-wise then summed to the (state,year,scenario) level.
+
+      - Initial stock (kWh):
+            initial_stock = SUM(initial_batt_kwh) at the first modeled year
+        `initial_batt_kwh` is already a cohort total and must **not** be
+        multiplied by adopters.
+
+      - Cumulative series:
+            batt_kwh_cum = initial_stock + cumsum(annual_add_kwh by year)
+
+    We keep the model’s original cumulative storage as 'batt_kwh_cum_model' for reference.
     """
     if df.empty:
         return {
@@ -726,42 +858,145 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
             "market_share_reached": pd.DataFrame(),
         }
 
-    x = df
+    x = df.copy()
+    x["state_abbr"] = x.get("state_abbr", "").astype(str).str.strip().str.upper()
 
-    x["new_adopters"] = x.get("new_adopters", 0.0).fillna(0.0)
-    x["number_of_adopters"] = x.get("number_of_adopters", 0.0).fillna(0.0)
-    x["first_year_elec_bill_savings"] = x.get("first_year_elec_bill_savings", 0.0).fillna(0.0)
-    x["customers_in_bin"] = x.get("customers_in_bin", 0.0).fillna(0.0)
-    x["max_market_share"] = x.get("max_market_share", 0.0).fillna(0.0)
+    # --- numeric coercions / fills ---
+    for c in ("year","new_adopters","number_of_adopters","first_year_elec_bill_savings",
+              "customers_in_bin","max_market_share","system_kw","new_system_kw",
+              "system_kw_cum","batt_kwh","batt_kwh_cum","avg_elec_price_cents_per_kwh",
+              "initial_batt_kwh"):
+        if c in x.columns:
+            x[c] = pd.to_numeric(x[c], errors="coerce")
 
-    median_kw = (
-        x.groupby(["state_abbr", "year", "scenario"], observed=True)["system_kw"]
-        .quantile(0.5, interpolation="linear")
-        .reset_index(name="median_system_kw")
-    )
+    defaults = {
+        "new_adopters": 0.0, "number_of_adopters": 0.0, "first_year_elec_bill_savings": 0.0,
+        "customers_in_bin": 0.0, "max_market_share": 0.0, "system_kw": 0.0,
+        "new_system_kw": 0.0, "system_kw_cum": 0.0, "batt_kwh_cum": 0.0,
+        "initial_batt_kwh": 0.0,
+    }
+    for c, v in defaults.items():
+        if c in x.columns:
+            x[c] = x[c].fillna(v)
 
-    # Median storage size (kWh) by state/year/scenario if batt_kwh is present; ignore zeros
-    if "batt_kwh" in x.columns:
-        median_storage = (
-            x[x['batt_kwh'] > 0]
-            .groupby(["state_abbr", "year", "scenario"], observed=True)["batt_kwh"]
-            .quantile(0.5, interpolation="linear")
-            .reset_index(name="median_batt_kwh")
+    # --------------------------
+    # MEDIANS (weighted by adopters; adopters-only)
+    # --------------------------
+    def _weighted_median(values: pd.Series, weights: pd.Series) -> float:
+        v = pd.to_numeric(values, errors="coerce")
+        w = pd.to_numeric(weights, errors="coerce").fillna(0).clip(lower=0)
+        mask = v.notna() & (w > 0)
+        if not mask.any():
+            return np.nan
+        v = v[mask].to_numpy()
+        w = w[mask].to_numpy()
+        order = np.argsort(v)
+        v = v[order]
+        w = w[order]
+        cw = np.cumsum(w)
+        cutoff = 0.5 * w.sum()
+        idx = int(np.searchsorted(cw, cutoff, side="left"))
+        return float(v[min(idx, len(v) - 1)])
+
+    # adopters-only view for medians
+    adopt = x.copy()
+    adopt["new_adopters"] = pd.to_numeric(adopt.get("new_adopters", 0.0), errors="coerce").fillna(0.0)
+    adopt = adopt[adopt["new_adopters"] > 0]
+
+    # Weighted median per-adopter PV size by state/year/scenario
+    if "system_kw" in adopt.columns and not adopt.empty:
+        median_kw = (
+            adopt.groupby(["state_abbr", "year", "scenario"], observed=True)
+                .apply(lambda g: g["new_system_kw"].sum()/g["new_adopters"].sum())
+                .reset_index(name="median_system_kw")
         )
     else:
-        median_storage = pd.DataFrame(columns=["state_abbr","year","scenario","median_batt_kwh"])
+        median_kw = pd.DataFrame(columns=["state_abbr", "year", "scenario", "median_system_kw"])
 
-    totals = (
-        x.groupby(["state_abbr", "year", "scenario"], as_index=False)
-         .agg(
-             batt_kwh_cum=("batt_kwh_cum", "sum"),
-             system_kw_cum=("system_kw_cum", "sum"),
-             number_of_adopters=("number_of_adopters", "sum"),
-         )
+    # Weighted median storage size among storage adopters (optional)
+    if "batt_kwh" in adopt.columns:
+        has_storage = adopt.copy()
+        has_storage["batt_kwh"] = pd.to_numeric(has_storage["batt_kwh"], errors="coerce")
+        has_storage = has_storage[has_storage["batt_kwh"] > 0]
+        if not has_storage.empty:
+            median_storage = (
+                has_storage.groupby(["state_abbr", "year", "scenario"], observed=True)
+                        .apply(lambda g: _weighted_median(g["batt_kwh"], g["new_adopters"]))
+                        .reset_index(name="median_batt_kwh")
+            )
+        else:
+            median_storage = pd.DataFrame(columns=["state_abbr", "year", "scenario", "median_batt_kwh"])
+    else:
+        median_storage = pd.DataFrame(columns=["state_abbr", "year", "scenario", "median_batt_kwh"])
+
+
+    # --- attachment-rate storage (robust) ---
+    attach_map = _get_attachment_rates_map()              # {STATE: 0..1}
+    x["attach_rate"] = x["state_abbr"].map(attach_map).fillna(0.0)
+
+    # Build a robust cohort PV total per row:
+    # prefer new_system_kw; if all-zero after loading, fall back to system_kw * new_adopters
+    x["cohort_pv_kw"] = x["new_system_kw"]
+    if float(x["cohort_pv_kw"].abs().sum()) == 0.0:
+        x["cohort_pv_kw"] = x["system_kw"] * x["new_adopters"]
+
+    # sum to (state,year,scenario)
+    pv_by_grp = (
+        x.groupby(["state_abbr","year","scenario"], as_index=False)["cohort_pv_kw"]
+         .sum()
+         .rename(columns={"cohort_pv_kw": "cohort_pv_kw_sum"})
+         .sort_values(["state_abbr","scenario","year"])
+    )
+    # multiply by state rate
+    pv_by_grp["annual_attach_kwh"] = pv_by_grp.apply(
+        lambda r: float(attach_map.get(r["state_abbr"], 0.0)) * float(r["cohort_pv_kw_sum"]),
+        axis=1
     )
 
-    tech_2040_src = x.loc[x["year"] == 2040, ["state_abbr", "scenario", "number_of_adopters", "customers_in_bin"]]
-    tech_2040 = tech_2040_src.groupby(["state_abbr", "scenario"], as_index=False).sum()
+    # initial stock at first year per (state,scenario)
+    x["_first_year"] = x.groupby(["state_abbr","scenario"], observed=True)["year"].transform("min")
+    initial_totals = (
+        x[x["year"] == x["_first_year"]]
+         .groupby(["state_abbr","scenario"], as_index=False)["initial_batt_kwh"]
+         .sum()
+         .rename(columns={"initial_batt_kwh": "initial_storage_kwh"})
+    )
+
+    # cumulative = initial + cumsum(annual adds)
+    if pv_by_grp.empty:
+        cum_attach = pd.DataFrame(columns=["state_abbr","scenario","year","batt_kwh_cum_from_attach"])
+    else:
+        annual = pv_by_grp.merge(initial_totals, on=["state_abbr","scenario"], how="left")
+        annual["initial_storage_kwh"] = annual["initial_storage_kwh"].fillna(0.0)
+
+        def _cum(g: pd.DataFrame) -> pd.DataFrame:
+            g = g.sort_values("year").copy()
+            g["batt_kwh_cum_from_attach"] = g["initial_storage_kwh"].iloc[0] + g["annual_attach_kwh"].cumsum()
+            return g
+
+        cum_attach = (
+            annual.groupby(["state_abbr","scenario"], observed=True, as_index=False)
+                  .apply(_cum)
+                  .reset_index(drop=True)
+        )[["state_abbr","scenario","year","batt_kwh_cum_from_attach"]]
+
+    # --- totals (override batt_kwh_cum; keep model as reference) ---
+    totals_model = (
+        x.groupby(["state_abbr","year","scenario"], as_index=False)
+         .agg(
+             batt_kwh_cum_model=("batt_kwh_cum","sum"),
+             system_kw_cum=("system_kw_cum","sum"),
+             number_of_adopters=("number_of_adopters","sum"),
+         )
+    )
+    totals = (
+        totals_model.merge(cum_attach, on=["state_abbr","scenario","year"], how="left")
+                    .rename(columns={"batt_kwh_cum_from_attach": "batt_kwh_cum"})
+    )
+
+    # --- tech potential (unchanged) ---
+    tech_2040_src = x.loc[x["year"] == 2040, ["state_abbr","scenario","number_of_adopters","customers_in_bin"]]
+    tech_2040 = tech_2040_src.groupby(["state_abbr","scenario"], as_index=False).sum()
     if not tech_2040.empty:
         tech_2040["percent_tech_potential"] = np.where(
             tech_2040["customers_in_bin"] > 0,
@@ -769,13 +1004,15 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
             np.nan,
         )
 
+    # --- savings (unchanged) ---
     portfolio_annual, cumulative_savings = compute_portfolio_and_cumulative_savings(x, cfg)
     lifetime_totals = (
-        portfolio_annual[["state_abbr", "scenario", "lifetime_savings_total"]]
+        portfolio_annual[["state_abbr","scenario","lifetime_savings_total"]]
         .drop_duplicates()
         .reset_index(drop=True)
     )
 
+    # --- avg price 2026 (unchanged) ---
     if (
         "avg_elec_price_cents_per_kwh" in x.columns
         and "customers_in_bin" in x.columns
@@ -792,21 +1029,21 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
 
         avg_price_2026_model = (
             price_2026.groupby("state_abbr", as_index=False)
-            .apply(_weighted_avg)
-            .rename(columns={None: "avg_elec_price_cents_per_kwh"})
+                      .apply(_weighted_avg)
+                      .rename(columns={None: "avg_elec_price_cents_per_kwh"})
         )
     else:
-        avg_price_2026_model = pd.DataFrame(columns=["state_abbr", "avg_elec_price_cents_per_kwh"])
+        avg_price_2026_model = pd.DataFrame(columns=["state_abbr","avg_elec_price_cents_per_kwh"])
 
+    # --- market share (unchanged) ---
     x["market_potential"] = x["customers_in_bin"] * x["max_market_share"]
     market_share = (
-        x.groupby(["state_abbr", "year", "scenario"], as_index=False)
+        x.groupby(["state_abbr","year","scenario"], as_index=False)
          .agg(
-             market_potential=("market_potential", "sum"),
-             market_reached=("number_of_adopters", "sum"),
+             market_potential=("market_potential","sum"),
+             market_reached=("number_of_adopters","sum"),
          )
     )
-    # fix typo: reference correct column
     market_share["market_share_reached"] = np.where(
         market_share["market_potential"] > 0,
         market_share["market_reached"] / market_share["market_potential"],
@@ -816,7 +1053,7 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
     return {
         "median_system_kw": median_kw,
         "median_storage_kwh": median_storage,
-        "totals": totals,
+        "totals": totals,  # batt_kwh_cum is attachment-based; model kept as batt_kwh_cum_model
         "tech_2040": tech_2040,
         "portfolio_annual_savings": portfolio_annual,
         "cumulative_bill_savings": cumulative_savings,
@@ -863,9 +1100,9 @@ def find_state_files(state_dir: str, run_id: Optional[str] = None, strict_run_id
 
 def _read_with_selected_cols(path: str) -> pd.DataFrame:
     """
-    Read a CSV keeping only columns present from NEEDED_COLS; missing columns are added.
-    If `scenario` or `state_abbr` is missing, they are inferred from file and directory names.
-    Robust to empty/zero-byte CSVs.
+    Read a CSV keeping only columns present from NEEDED_COLS (+ OPTIONAL_COLS when present).
+    Missing columns are added. If `scenario` or `state_abbr` is missing, they are inferred
+    from file and directory names. Robust to empty/zero-byte CSVs.
     """
     if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
         return pd.DataFrame(columns=NEEDED_COLS)
@@ -875,14 +1112,16 @@ def _read_with_selected_cols(path: str) -> pd.DataFrame:
     except pd.errors.EmptyDataError:
         return pd.DataFrame(columns=NEEDED_COLS)
 
-    present = [c for c in NEEDED_COLS if c in header.columns]
+    core = [c for c in NEEDED_COLS if c in header.columns]
+    opt  = [c for c in OPTIONAL_COLS if c in header.columns]
+    usecols = core + opt
 
     try:
-        df = pd.read_csv(path, usecols=present) if present else pd.DataFrame(columns=NEEDED_COLS)
+        df = pd.read_csv(path, usecols=usecols) if usecols else pd.DataFrame(columns=NEEDED_COLS)
     except (pd.errors.EmptyDataError, ValueError):
         return pd.DataFrame(columns=NEEDED_COLS)
 
-    # Add missing columns
+    # Add missing core columns
     for c in NEEDED_COLS:
         if c not in df.columns:
             df[c] = np.nan
@@ -914,7 +1153,8 @@ def _process_one_state(args) -> Dict[str, pd.DataFrame]:
                     "first_year_elec_bill_savings", "system_kw",
                     "system_kw_cum", "batt_kwh", "batt_kwh_cum",
                     "customers_in_bin", "max_market_share",
-                    "avg_elec_price_cents_per_kwh"):
+                    "avg_elec_price_cents_per_kwh",
+                    "initial_batt_kwh", "initial_number_of_adopters"):
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
         # Fill non-negative quantities
