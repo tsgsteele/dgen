@@ -3,11 +3,7 @@ logsPolicy:
 
 taskGroups:
   - taskCount: "5"               # one task per state
-<<<<<<< HEAD
-    parallelism: "2"             # run all states in parallel
-=======
     parallelism: "1"             # run all states in parallel
->>>>>>> hourly_export_time_series
     schedulingPolicy: AS_SOON_AS_POSSIBLE
 
     taskSpec:

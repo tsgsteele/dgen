@@ -21,7 +21,7 @@ JOB_NAME="dgen-mid-states-${JOB_TS}"
 gcloud batch jobs submit "${JOB_NAME}" \
   --location="${LOCATION}" \
   --config="batch_job_yamls/dgen-batch-job-mid-states.yaml" \
-  --machine-type="c2d-highcpu-16"  \
+  --machine-type="c2d-highcpu-32"  \
   --provisioning-model="SPOT"
 
 # Define job name with timestamp
@@ -31,7 +31,7 @@ JOB_NAME="dgen-mid-large-states-${JOB_TS}"
 gcloud batch jobs submit "${JOB_NAME}" \
   --location="${LOCATION}" \
   --config="batch_job_yamls/dgen-batch-job-mid-large-states.yaml" \
-  --machine-type="c2d-highcpu-32"  \
+  --machine-type="c2d-highcpu-56"  \
   --provisioning-model="SPOT"
 
 # Define job name with timestamp

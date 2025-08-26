@@ -3,13 +3,16 @@ import pandas as pd
 import numpy as np
 import os
 import sqlalchemy
-from sqlalchemy import text
+from sqlalchemy import text, inspect
+from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY, DOUBLE_PRECISION, TEXT as PG_TEXT
 import data_functions as datfunc
 import utility_functions as utilfunc
 import agent_mutation
 from agents import Agents, Solar_Agents
 from pandas import DataFrame
 import json
+import math
+
 
 # Load logger
 logger = utilfunc.get_logger()
@@ -41,32 +44,8 @@ def get_psql_table_fields(engine, schema, name):
 
 def df_to_psql(df, engine, schema, owner, name, if_exists='replace', append_transformations=False):
     """
-    Uploads dataframe to database
-    
-    Parameters
-    ----------
-    df : 'pd.df'
-        Dataframe to upload to database
-    engine : 'SQL table'
-        SQL engine to intepret SQL query 
-    schema : 'SQL schema'
-        Schema in which to upload df
-    owner : 'string'
-        Owner of schema
-    name : 'string'
-        Name to be given to table that is uploaded
-    if_exists : 'replace or append'
-        If table exists and if if_exists set to replace, replaces table in database. If table exists and if if_exists set to append, appendss table in database. 
-    append_transformations : 'bool'
-        IDK
-    
-    Returns
-    -------
-    df : 'pd.df'
-        Dataframe that was uploaded to database
-
+    Uploads dataframe to database, storing numeric lists/ndarrays as DOUBLE PRECISION[].
     """
-
     d_types = {}
     transform = {}
     f_d_type = {}
@@ -75,35 +54,63 @@ def df_to_psql(df, engine, schema, owner, name, if_exists='replace', append_tran
     delete_list = []
     orig_fields = df.columns.values
     df.columns = [i.lower() for i in orig_fields]
+
+    def _sample_inner(seq):
+        if isinstance(seq, (list, tuple, np.ndarray, pd.Series)):
+            for v in list(seq):
+                if v is None:
+                    continue
+                if isinstance(v, float) and math.isnan(v):
+                    continue
+                return v
+        return None
+
+    # Detect types and prep dtype/sql_type/transform
     for f in df.columns:
         df_filter = pd.notnull(df[f]).values
         if sum(df_filter) > 0:
-            f_d_type[f] = type(df[f][df_filter].values[0]).__name__.lower()
+            first_val = df[f][df_filter].values[0]
+            f_d_type[f] = type(first_val).__name__.lower()
 
-            if f_d_type[f][0:3].lower() == 'int':
+            # Scalars
+            if f_d_type[f].startswith('int'):
                 sql_type[f] = 'INTEGER'
 
-            if f_d_type[f][0:5].lower() == 'float':
+            if f_d_type[f].startswith('float'):
                 d_types[f] = sqlalchemy.types.NUMERIC
                 sql_type[f] = 'NUMERIC'
 
-            if f_d_type[f][0:3].lower() == 'str':
+            if f_d_type[f].startswith('str'):
                 sql_type[f] = 'VARCHAR'
 
-            if f_d_type[f] == 'list':
-                d_types[f] = sqlalchemy.types.ARRAY(sqlalchemy.types.STRINGTYPE)
-                transform[f] = lambda x: json.dumps(x)
-                sql_type[f] = 'VARCHAR'
+            # Arrays (list/ndarray) → PG arrays (prefer double precision)
+            if f_d_type[f] in ('list', 'ndarray'):
+                # ensure ndarray → list so psycopg2 adapts to PG array cleanly
+                df[f] = df[f].apply(lambda x: x.tolist() if isinstance(x, np.ndarray) else x)
 
-            if f_d_type[f] == 'ndarray':
-                d_types[f] = sqlalchemy.types.ARRAY(sqlalchemy.types.STRINGTYPE)
-                transform[f] = lambda x: json.dumps(list(x))
-                sql_type[f] = 'VARCHAR'
+                # peek inside to decide numeric vs text array
+                inner = None
+                for v in df[f]:
+                    if isinstance(v, (list, tuple, np.ndarray, pd.Series)) and len(v) > 0:
+                        inner = _sample_inner(v)
+                        break
 
+                if inner is None or isinstance(inner, (int, float, np.integer, np.floating)):
+                    d_types[f] = PG_ARRAY(DOUBLE_PRECISION())
+                    sql_type[f] = 'DOUBLE PRECISION[]'
+                else:
+                    d_types[f] = PG_ARRAY(PG_TEXT())
+                    sql_type[f] = 'TEXT[]'
+                    # normalize elements to str for TEXT[]
+                    df[f] = df[f].apply(lambda xs: [None if x is None else str(x)] if isinstance(xs, list) and xs else xs)
+
+            # Complex types keep old behavior
             if f_d_type[f] == 'dict':
                 d_types[f] = sqlalchemy.types.STRINGTYPE
                 transform[f] = lambda x: json.dumps(
-                    dict([(k_v[0], list(k_v[1])) if (type(k_v[1]).__name__ == 'ndarray') else (k_v[0], k_v[1]) for k_v in list(x.items())]))
+                    dict([(k_v[0], list(k_v[1])) if (type(k_v[1]).__name__ == 'ndarray') else (k_v[0], k_v[1])
+                          for k_v in list(x.items())])
+                )
                 sql_type[f] = 'VARCHAR'
 
             if f_d_type[f] == 'interval':
@@ -113,14 +120,16 @@ def df_to_psql(df, engine, schema, owner, name, if_exists='replace', append_tran
 
             if f_d_type[f] == 'dataframe':
                 d_types[f] = sqlalchemy.types.STRINGTYPE
-                transform[f] = lambda x: x.to_json() if isinstance(x,DataFrame) else str(x)
+                transform[f] = lambda x: x.to_json() if isinstance(x, pd.DataFrame) else str(x)
                 sql_type[f] = 'VARCHAR'
         else:
-            orig_fields = [i for i in orig_fields if i.lower()!=f]
+            # Entirely-null column: drop before write
+            orig_fields = [i for i in orig_fields if i.lower() != f]
             delete_list.append(f)
 
     df = df.drop(delete_list, axis=1)
 
+    # Apply transforms for non-array complex types
     for k, v in list(transform.items()):
         if append_transformations:
             df[k + "_" + f_d_type[k]] = df[k].apply(v)
@@ -128,22 +137,26 @@ def df_to_psql(df, engine, schema, owner, name, if_exists='replace', append_tran
             del df[k]
             del sql_type[k]
         else:
-            df[k] = df[k].apply(v)   
+            df[k] = df[k].apply(v)
 
     conn = engine.connect()
-    if if_exists == 'append':
+
+    # If appending, add any missing columns if the table already exists
+    table_exists = inspect(engine).has_table(name, schema=schema)
+    if if_exists == 'append' and table_exists:
         fields = [i.lower() for i in get_psql_table_fields(engine, schema, name)]
         for f in list(set(df.columns.values) - set(fields)):
             with conn.begin():
-                sql = text("ALTER TABLE {}.{} ADD COLUMN {} {}".format(schema, name, f, sql_type[f]))
-                conn.execute(sql)
-        
-    df.to_sql(name, engine, schema=schema, index=False, dtype=d_types, if_exists=if_exists)
-    sql = text('ALTER TABLE {}."{}" OWNER to "{}"'.format(schema, name, owner))
-    conn.execute(sql)
+                # quote schema/table/column
+                conn.execute(text(f'ALTER TABLE "{schema}"."{name}" ADD COLUMN "{f}" {sql_type[f]}'))
 
+    # Write rows; dtype guides SQLAlchemy/psycopg2 for arrays
+    df.to_sql(name, engine, schema=schema, index=False, dtype=d_types, if_exists=if_exists)
+
+    # Set owner
+    conn.execute(text(f'ALTER TABLE "{schema}"."{name}" OWNER TO "{owner}"'))
     conn.close()
-    engine.dispose() 
+    engine.dispose()
 
     df.columns = orig_fields
     return df
