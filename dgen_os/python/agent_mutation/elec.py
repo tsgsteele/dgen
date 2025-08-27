@@ -415,8 +415,8 @@ def calculate_developable_customers_and_load(dataframe):
 
     dataframe = dataframe.reset_index()
 
-    dataframe['developable_agent_weight'] = dataframe['pct_of_bldgs_developable'] * dataframe['customers_in_bin']
-    dataframe['developable_load_kwh_in_bin'] = dataframe['pct_of_bldgs_developable'] * dataframe['load_kwh_in_bin']
+    dataframe['developable_agent_weight'] = dataframe['customers_in_bin']
+    dataframe['developable_load_kwh_in_bin'] = dataframe['load_kwh_in_bin']
 
     dataframe = dataframe.set_index('agent_id')
 

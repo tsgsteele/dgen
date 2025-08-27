@@ -137,9 +137,9 @@ def calc_system_performance(
         batt.BatterySystem.batt_replacement_option = 0
         batt.batt_minimum_SOC = 10
 
-        pv_to_batt_ratio = 1
+        pv_to_batt_ratio = 0.8
         batt_capacity_to_power_ratio = 2.0
-        desired_size  = 8
+        desired_size  = kw / pv_to_batt_ratio
         desired_power = desired_size / batt_capacity_to_power_ratio
         desired_voltage = 500 if agent.loc['sector_abbr'] != 'res' else 240
         battery_tools.battery_model_sizing(
