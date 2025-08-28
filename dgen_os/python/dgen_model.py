@@ -90,79 +90,83 @@ def _load_state_attachment_rates(csv_path: str = "../input_data/ohm_attachment_r
 
 def _allocate_battery_adopters_integer(df: pd.DataFrame, year: int) -> pd.DataFrame:
     """
-    Allocate integer battery adopters by state×sector for THIS YEAR using largest remainders.
+    Allocate integer battery adopters by state×sector for THIS YEAR
+    using the largest remainders method.
 
-    Purpose
-    -------
-    After diffusion (PV-only), convert state-level storage attachment rates into exact
-    per-agent battery adopter counts for the current year, then compute new/cumulative
-    battery capacities.
+    Notes
+    -----
+    • Diffusion (in diffusion_functions_elec.calc_diffusion_solar) already
+      produces the correct per-year PV cohort via `new_adopters`.
+    • This function must NOT overwrite `new_adopters`.
+      (Earlier versions incorrectly recomputed it as
+       number_of_adopters - initial_number_of_adopters, which
+       double-counted all prior years.)
+    • We only allocate which of those *new* PV adopters take storage,
+      according to the state-level `storage_attachment_rate`.
 
-    Inputs
-    ------
+    Parameters
+    ----------
     df : pandas.DataFrame
-        Agent-year frame (after diffusion) with:
+        Agent-year frame (after diffusion). Must include:
           - 'state_abbr','sector_abbr','agent_id'
-          - 'number_of_adopters','initial_number_of_adopters'
-          - 'batt_kw','batt_kwh','batt_kw_cum_last_year','batt_kwh_cum_last_year'
-          - 'storage_attachment_rate' (merged per state; in [0,1])
-        Missing columns are created with zeros (IDs from index for agent_id).
+          - 'new_adopters','number_of_adopters'
+          - 'batt_kw','batt_kwh',
+            'batt_kw_cum_last_year','batt_kwh_cum_last_year'
+          - 'storage_attachment_rate' (per state, in [0,1])
     year : int
-        Solve year (not used in this simplified tiebreak; kept for signature compatibility).
+        Current solve year (not used here, kept for compatibility).
 
     Returns
     -------
     pandas.DataFrame
-        Original df with added/updated columns:
-          - 'new_adopters'
+        Copy of `df` with added columns:
           - 'batt_adopters_added_this_year' (int)
           - 'new_batt_kw','new_batt_kwh'
           - 'batt_kw_cum','batt_kwh_cum'
     """
     df = df.copy()
 
+    # Ensure required columns exist (fill missing with 0)
     need = [
-        'state_abbr','sector_abbr','agent_id','number_of_adopters','initial_number_of_adopters',
-        'batt_kw','batt_kwh','batt_kw_cum_last_year','batt_kwh_cum_last_year','storage_attachment_rate'
+        'state_abbr','sector_abbr','agent_id','new_adopters','number_of_adopters',
+        'batt_kw','batt_kwh','batt_kw_cum_last_year','batt_kwh_cum_last_year',
+        'storage_attachment_rate'
     ]
     for c in need:
         if c not in df.columns:
-            df[c] = df.index.astype(str) if c in ('agent_id',) else 0.0
+            df[c] = df.index.astype(str) if c == 'agent_id' else 0.0
 
-    # New PV adopters this year
-    df['new_adopters'] = (df['number_of_adopters'] - df['initial_number_of_adopters']).clip(lower=0)
-
-    # Use a Series indexed like df.index so we can assign by label (agent_id)
+    # Integer allocation per state×sector using largest remainders
     alloc = pd.Series(0, index=df.index, dtype=int)
 
     for (s, sec), g in df.groupby(['state_abbr', 'sector_abbr'], sort=False):
-        idx = g.index  # labels (agent_id), not 0..N positions
+        idx = g.index
         r = float(g['storage_attachment_rate'].iloc[0]) if len(g) else 0.0
-        r = 0.0 if r < 0 else (1.0 if r > 1.0 else r)
+        r = max(0.0, min(1.0, r))  # clamp to [0,1]
 
         n = g['new_adopters'].to_numpy(dtype=float)
         if n.sum() <= 0 or r <= 0:
             continue
 
+        # Target number of battery adopters in this group
         target = int(round(r * n.sum()))
+
+        # Initial floor allocation
         f = r * n
         base = np.floor(f).astype(int)
         rem = target - base.sum()
-        if rem <= 0:
-            alloc.loc[idx] = base
-            continue
 
-        frac = f - base
-        # Sort by fractional part desc, then agent_id asc (stable, deterministic)
-        order_idx = (
-            g.assign(_frac=frac, _aid=g['agent_id'].astype(str))
-             .sort_values(['_frac', '_aid'], ascending=[False, True])
-             .index.to_numpy()
-        )
-        winners = order_idx[:rem]
-        winners_mask = np.isin(idx.to_numpy(), winners)  # mask aligned to `base` order
-        base = base.copy()
-        base[winners_mask] += 1
+        if rem > 0:
+            frac = f - base
+            order_idx = (
+                g.assign(_frac=frac, _aid=g['agent_id'].astype(str))
+                 .sort_values(['_frac','_aid'], ascending=[False,True])
+                 .index.to_numpy()
+            )
+            winners = order_idx[:rem]
+            winners_mask = np.isin(idx.to_numpy(), winners)
+            base = base.copy()
+            base[winners_mask] += 1
 
         alloc.loc[idx] = base
 
