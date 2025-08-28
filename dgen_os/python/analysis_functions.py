@@ -626,99 +626,6 @@ def facet_state_peak_timeseries_from_hourly(
     plt.show()
 
 
-# -----------------------------------------------------------------------------
-# Attachment-rate CSV → weighted per-state rates (cached)
-# -----------------------------------------------------------------------------
-_ATTACHMENT_RATES_CACHE: Optional[Dict[str, float]] = None
-
-def _load_weighted_attachment_rates(csv_path: str = "../../../data/ohm_attachment_rates.csv") -> pd.DataFrame:
-    """
-    Input CSV columns:
-      state_abbr, metric ∈ {'attachment_rate','install_volume'}, q2_24, q3_24, q4_24, q1_25
-
-    Returns:
-      DataFrame with ['state_abbr','attach_rate_weighted'] where attachment_rate is
-      install-volume weighted across the four quarters.
-
-    Normalization details:
-      - 'attachment_rate' values may be in %, strings with '%', or proportions.
-      - We parse, strip '%', and if value > 1 we treat it as percent and divide by 100.
-      - We clamp to [0, 1] to avoid outliers.
-    """
-    qcols = ["q2_24", "q3_24", "q4_24", "q1_25"]
-    df = pd.read_csv(csv_path, dtype={"state_abbr": "string", "metric": "string"})
-
-    # long format
-    long = df.melt(
-        id_vars=["state_abbr", "metric"],
-        value_vars=qcols,
-        var_name="quarter",
-        value_name="value",
-    )
-
-    # clean
-    long["state_abbr"] = long["state_abbr"].str.strip().str.upper()
-    long["metric"] = long["metric"].str.strip().str.lower()
-    # convert value: strip % and commas, then numeric
-    long["value"] = (
-        long["value"]
-        .astype(str)
-        .str.replace("%", "", regex=False)
-        .str.replace(",", "", regex=False)
-    )
-    long["value"] = pd.to_numeric(long["value"], errors="coerce")
-
-    # pivot back: columns 'attachment_rate' and 'install_volume'
-    piv = long.pivot_table(
-        index=["state_abbr", "quarter"],
-        columns="metric",
-        values="value",
-        aggfunc="first",
-    ).reset_index()
-
-    # normalize rates: if >1 treat as percent -> proportion
-    if "attachment_rate" in piv.columns:
-        ar = pd.to_numeric(piv["attachment_rate"], errors="coerce")
-        ar = np.where(ar > 1, ar / 100.0, ar)
-        ar = np.clip(ar, 0.0, 1.0)
-        piv["attachment_rate"] = ar
-    else:
-        piv["attachment_rate"] = 0.0
-
-    if "install_volume" not in piv.columns:
-        piv["install_volume"] = 0.0
-    piv["install_volume"] = pd.to_numeric(piv["install_volume"], errors="coerce").fillna(0.0)
-
-    def _weighted(g: pd.DataFrame) -> float:
-        w = g["install_volume"].to_numpy()
-        v = g["attachment_rate"].to_numpy()
-        wsum = float(np.nansum(w))
-        if wsum > 0:
-            return float(np.average(v, weights=w))
-        # fallback to simple mean if no volume
-        return float(np.nanmean(v)) if np.isfinite(np.nanmean(v)) else 0.0
-
-    out = (
-        piv.groupby("state_abbr", as_index=False)
-           .apply(lambda g: pd.Series({"attach_rate_weighted": _weighted(g)}))
-           .reset_index(drop=True)
-    )
-    return out
-
-def _get_attachment_rates_map(csv_path: str = "../../../data/ohm_attachment_rates.csv") -> Dict[str, float]:
-    """
-    Cache and return: {STATE_ABBR -> weighted attachment rate (0..1)}.
-    """
-    global _ATTACHMENT_RATES_CACHE
-    if _ATTACHMENT_RATES_CACHE is None:
-        try:
-            df = _load_weighted_attachment_rates(csv_path)
-            _ATTACHMENT_RATES_CACHE = dict(zip(df["state_abbr"], df["attach_rate_weighted"]))
-        except Exception:
-            _ATTACHMENT_RATES_CACHE = {}
-    return _ATTACHMENT_RATES_CACHE
-
-
 # =============================================================================
 # Savings & Aggregations
 # =============================================================================
@@ -826,24 +733,8 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
     """
     Aggregate per-state metrics for plotting and exports.
 
-    Storage (attachment-based) logic:
-      - Annual additions (kWh) for a state/year/scenario:
-            annual_add_kwh = attach_rate[state] * cohort_pv_kw
-        where cohort_pv_kw is the **cohort-total PV** in kW for that year.
-        We prefer the provided `new_system_kw` column (already a cohort total).
-        If it is missing or zero after loading/merges, we fall back to
-            cohort_pv_kw = system_kw * new_adopters
-        computed row-wise then summed to the (state,year,scenario) level.
-
-      - Initial stock (kWh):
-            initial_stock = SUM(initial_batt_kwh) at the first modeled year
-        `initial_batt_kwh` is already a cohort total and must **not** be
-        multiplied by adopters.
-
-      - Cumulative series:
-            batt_kwh_cum = initial_stock + cumsum(annual_add_kwh by year)
-
-    We keep the model’s original cumulative storage as 'batt_kwh_cum_model' for reference.
+    NOTE: Attachment-rate post-processing has been REMOVED.
+    Storage totals now use the model-provided fields directly (e.g., batt_kwh_cum).
     """
     if df.empty:
         return {
@@ -898,7 +789,6 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
         idx = int(np.searchsorted(cw, cutoff, side="left"))
         return float(v[min(idx, len(v) - 1)])
 
-    # adopters-only view for medians
     adopt = x.copy()
     adopt["new_adopters"] = pd.to_numeric(adopt.get("new_adopters", 0.0), errors="coerce").fillna(0.0)
     adopt = adopt[adopt["new_adopters"] > 0]
@@ -907,8 +797,8 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
     if "system_kw" in adopt.columns and not adopt.empty:
         median_kw = (
             adopt.groupby(["state_abbr", "year", "scenario"], observed=True)
-                .apply(lambda g: g["new_system_kw"].sum()/g["new_adopters"].sum())
-                .reset_index(name="median_system_kw")
+                 .apply(lambda g: g["system_kw_cum"].sum()/g["number_of_adopters"].sum())
+                 .reset_index(name="median_system_kw")
         )
     else:
         median_kw = pd.DataFrame(columns=["state_abbr", "year", "scenario", "median_system_kw"])
@@ -921,77 +811,22 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
         if not has_storage.empty:
             median_storage = (
                 has_storage.groupby(["state_abbr", "year", "scenario"], observed=True)
-                        .apply(lambda g: _weighted_median(g["batt_kwh"], g["new_adopters"]))
-                        .reset_index(name="median_batt_kwh")
+                           .apply(lambda g: _weighted_median(g["batt_kwh"], g["new_adopters"]))
+                           .reset_index(name="median_batt_kwh")
             )
         else:
             median_storage = pd.DataFrame(columns=["state_abbr", "year", "scenario", "median_batt_kwh"])
     else:
         median_storage = pd.DataFrame(columns=["state_abbr", "year", "scenario", "median_batt_kwh"])
 
-
-    # --- attachment-rate storage (robust) ---
-    attach_map = _get_attachment_rates_map()              # {STATE: 0..1}
-    x["attach_rate"] = x["state_abbr"].map(attach_map).fillna(0.0)
-
-    # Build a robust cohort PV total per row:
-    # prefer new_system_kw; if all-zero after loading, fall back to system_kw * new_adopters
-    x["cohort_pv_kw"] = x["new_system_kw"]
-    if float(x["cohort_pv_kw"].abs().sum()) == 0.0:
-        x["cohort_pv_kw"] = x["system_kw"] * x["new_adopters"]
-
-    # sum to (state,year,scenario)
-    pv_by_grp = (
-        x.groupby(["state_abbr","year","scenario"], as_index=False)["cohort_pv_kw"]
-         .sum()
-         .rename(columns={"cohort_pv_kw": "cohort_pv_kw_sum"})
-         .sort_values(["state_abbr","scenario","year"])
-    )
-    # multiply by state rate
-    pv_by_grp["annual_attach_kwh"] = pv_by_grp.apply(
-        lambda r: float(attach_map.get(r["state_abbr"], 0.0)) * float(r["cohort_pv_kw_sum"]),
-        axis=1
-    )
-
-    # initial stock at first year per (state,scenario)
-    x["_first_year"] = x.groupby(["state_abbr","scenario"], observed=True)["year"].transform("min")
-    initial_totals = (
-        x[x["year"] == x["_first_year"]]
-         .groupby(["state_abbr","scenario"], as_index=False)["initial_batt_kwh"]
-         .sum()
-         .rename(columns={"initial_batt_kwh": "initial_storage_kwh"})
-    )
-
-    # cumulative = initial + cumsum(annual adds)
-    if pv_by_grp.empty:
-        cum_attach = pd.DataFrame(columns=["state_abbr","scenario","year","batt_kwh_cum_from_attach"])
-    else:
-        annual = pv_by_grp.merge(initial_totals, on=["state_abbr","scenario"], how="left")
-        annual["initial_storage_kwh"] = annual["initial_storage_kwh"].fillna(0.0)
-
-        def _cum(g: pd.DataFrame) -> pd.DataFrame:
-            g = g.sort_values("year").copy()
-            g["batt_kwh_cum_from_attach"] = g["initial_storage_kwh"].iloc[0] + g["annual_attach_kwh"].cumsum()
-            return g
-
-        cum_attach = (
-            annual.groupby(["state_abbr","scenario"], observed=True, as_index=False)
-                  .apply(_cum)
-                  .reset_index(drop=True)
-        )[["state_abbr","scenario","year","batt_kwh_cum_from_attach"]]
-
-    # --- totals (override batt_kwh_cum; keep model as reference) ---
-    totals_model = (
+    # --- totals (DIRECTLY from model outputs; no attachment-rate math) ---
+    totals = (
         x.groupby(["state_abbr","year","scenario"], as_index=False)
          .agg(
-             batt_kwh_cum_model=("batt_kwh_cum","sum"),
              system_kw_cum=("system_kw_cum","sum"),
+             batt_kwh_cum=("batt_kwh_cum","sum"),
              number_of_adopters=("number_of_adopters","sum"),
          )
-    )
-    totals = (
-        totals_model.merge(cum_attach, on=["state_abbr","scenario","year"], how="left")
-                    .rename(columns={"batt_kwh_cum_from_attach": "batt_kwh_cum"})
     )
 
     # --- tech potential (unchanged) ---
@@ -1053,7 +888,7 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
     return {
         "median_system_kw": median_kw,
         "median_storage_kwh": median_storage,
-        "totals": totals,  # batt_kwh_cum is attachment-based; model kept as batt_kwh_cum_model
+        "totals": totals,  # uses model's batt_kwh_cum directly
         "tech_2040": tech_2040,
         "portfolio_annual_savings": portfolio_annual,
         "cumulative_bill_savings": cumulative_savings,
