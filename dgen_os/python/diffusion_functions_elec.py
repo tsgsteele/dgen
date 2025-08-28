@@ -20,135 +20,138 @@ logger = utilfunc.get_logger()
 #==============================================================================
 
 #=============================================================================
-@decorators.fn_timer(logger = logger, tab_level = 2, prefix = '')
+@decorators.fn_timer(logger=logger, tab_level=2, prefix='')
 def calc_diffusion_solar(df, is_first_year, bass_params, year,
-                           override_p_value = None, override_q_value = None, override_teq_yr1_value = None):
+                         override_p_value=None, override_q_value=None, override_teq_yr1_value=None):
     """
-    Calculates the market share (ms) added in the solve year. Market share must be less
-    than max market share (mms) except initial ms is greater than the calculated mms.
-    For this circumstance, no diffusion allowed until mms > ms. Also, do not allow ms to
-    decrease if economics deterioriate. Using the calculated 
-    market share, relevant quantities are updated.
+    PV-only diffusion for the current solve year.
 
-    Parameters
-    ----------
+    Purpose
+    -------
+    Compute new PV adoption and PV capacity updates using Bass diffusion and economics,
+    but DO NOT compute battery flows here. Battery adoption (integer allocation by
+    state×sector) and battery capacity cumulatives are applied AFTER diffusion in
+    dgen_model.py, using attachment rates.
+
+    Inputs
+    ------
     df : pandas.DataFrame
-        Input dataframe.
+        Agent-level frame for THIS year (after apply_market_last_year when not first year).
+        Must include:
+          - 'state_abbr','sector_abbr','market_share_last_year','max_market_share'
+          - 'developable_agent_weight','system_kw','system_capex_per_kw'
+          - 'system_kw_cum_last_year','adopters_cum_last_year'
+          - 'batt_kw_cum_last_year','batt_kwh_cum_last_year' (carried through unchanged here)
     is_first_year : bool
-        Passed to :func:`diffusion_functions.calc_diffusion_market_share` to determine the increment of `teq`
     bass_params : pandas.DataFrame
-        DataFrame generally derived from :func:`settings.get_bass_params`, includes the following attributes: `control_reg_id`, `country_abbr`, `sector_abbr`, `state_id`, `p`, `q`, `teq_yr1`, `tech`.
-    override_p_values : float , optional
-        Value to override bass diffusion `p` coefficient of innovation with.
-    overide_q_values : float, optional
-        Value to override bass diffusion `q` coefficient of immitation with.
-    override_teq_yr1_value : float, optional
-        Value to override bass diffusion `teq_yr1` value representing the number of years since diffusion began for the first year of observation.
+        p, q, teq_yr1 by (state, sector) for tech == 'solar'
+    year : int
+    override_* : optional overrides for p, q, teq_yr1
+
     Returns
-    -------    
-    pandas.DataFrame
-            Dataframe contains `market_last_year` column to inform diffusion in next year.
-
+    -------
+    (df, market_last_year_df) : tuple
+        df with PV 'new_*' and '*_cum' updated; battery 'new_*' set to 0 and
+        battery '*_cum' left unchanged here.
+        market_last_year_df has the usual '*_last_year' fields for next iteration.
     """
-    
+    import numpy as np
+    import pandas as pd
+
     df = df.reset_index()
-    bass_params = bass_params[bass_params['tech']=='solar']    
-    
-    # set p/q/teq_yr1 params    
-    df = pd.merge(df, bass_params[['state_abbr', 'bass_param_p', 'bass_param_q', 'teq_yr1', 'sector_abbr']], how = 'left', on  = ['state_abbr','sector_abbr'])
-    
-    # calc diffusion market share
-    df = calc_diffusion_market_share(df, is_first_year)
-    
-    # market share floor is based on last year's market share
+    bass_params = bass_params[bass_params['tech'] == 'solar']
+
+    # p/q/teq_yr1 params and diffusion step
+    df = pd.merge(
+        df,
+        bass_params[['state_abbr', 'bass_param_p', 'bass_param_q', 'teq_yr1', 'sector_abbr']],
+        how='left',
+        on=['state_abbr', 'sector_abbr']
+    )
+
+    df = calc_diffusion_market_share(df, is_first_year)  # teq, new_adopt_fraction, bass_market_share, etc.
+
+    # Market share floor and delta
     df['market_share'] = np.maximum(df['diffusion_market_share'], df['market_share_last_year'])
-   
-    # calculate the "new" market share (old - current)
-    df['new_market_share'] = df['market_share'] - df['market_share_last_year']
+    df['new_market_share'] = df['market_share'] - df['market_share_last_year']                   
+    df['new_market_share'] = np.where(df['market_share'] > df['max_market_share'], 0, df['new_market_share']) 
 
-    # cap the new_market_share where the market share exceeds the max market share
-    df['new_market_share'] = np.where(df['market_share'] > df['max_market_share'], 0, df['new_market_share'])
+    # New PV adopters/capacity/value (PV-only)
+    df['new_adopters']      = df['new_market_share'] * df['developable_agent_weight']         
+    df['new_market_value']  = df['new_adopters'] * df['system_kw'] * df['system_capex_per_kw']   
+    df['new_system_kw']     = df['new_adopters'] * df['system_kw']                          
 
-    # calculate new adopters, capacity and market value            
-    df['new_adopters'] = df['new_market_share'] * df['developable_agent_weight']
-    df['new_market_value'] = df['new_adopters'] * df['system_kw'] * df['system_capex_per_kw']
+    # --- Battery is deferred to post-diffusion step ---
+    # Keep columns present for downstream code, but do not add any battery this step
+    df['new_batt_kw']  = 0.0                                                                     # (was df['new_adopters'] * df['batt_kw'])
+    df['new_batt_kwh'] = 0.0
 
-    df['new_system_kw'] = df['new_adopters'] * df['system_kw']
-    df['new_batt_kw'] = df['new_adopters'] * df['batt_kw']
-    df['new_batt_kwh'] = df['new_adopters'] * df['batt_kwh']
+    # Update cumulatives (PV updated; battery passed through unchanged here)
+    df['number_of_adopters'] = df['adopters_cum_last_year'] + df['new_adopters']               
+    df['market_value']       = df['market_value_last_year'] + df['new_market_value']            
+    df['system_kw_cum']      = df['system_kw_cum_last_year'] + df['new_system_kw']            
 
-    # then add these values to values from last year to get cumulative values:
-    df['number_of_adopters'] = df['adopters_cum_last_year'] + df['new_adopters']
-    df['market_value'] = df['market_value_last_year'] + df['new_market_value']
+    # Battery cumulatives: leave as last year for now (actuals applied after diffusion)
+    df['batt_kw_cum']  = df['batt_kw_cum_last_year']                                             # (was + new_batt_kw)
+    df['batt_kwh_cum'] = df['batt_kwh_cum_last_year']
 
-    df['system_kw_cum'] = df['system_kw_cum_last_year'] + df['new_system_kw']
-    df['batt_kw_cum'] = df['batt_kw_cum_last_year'] + df['new_batt_kw']
-    df['batt_kwh_cum'] = df['batt_kwh_cum_last_year'] + df['new_batt_kwh']
-    
-    # constrain state-level capacity totals to known historical values
-    if year in (2014,2016,2018):
+    # Optional historical anchoring for PV ONLY in anchor years
+    if year in (2014, 2016, 2018):                                                        
         group_cols = ['state_abbr', 'sector_abbr', 'year']
-        state_capacity_total = (df[group_cols+['system_kw_cum', 'batt_kw_cum', 'batt_kwh_cum', 'agent_id']].groupby(group_cols)
-                                                                            .agg({'system_kw_cum':'sum', 'batt_kw_cum':'sum', 'batt_kwh_cum':'sum', 'agent_id':'count'})
-                                                                            .rename(columns={'system_kw_cum':'state_solar_kw_cum', 'batt_kw_cum':'state_batt_kw_cum', 'batt_kwh_cum':'state_batt_kwh_cum', 'agent_id':'agent_count'})
-                                                                            .reset_index())
-        
-        # coerce dtypes
-        state_capacity_total.state_solar_kw_cum = state_capacity_total.state_solar_kw_cum.astype(np.float64)
-        state_capacity_total.state_batt_kw_cum = state_capacity_total.state_batt_kw_cum.astype(np.float64) 
-        state_capacity_total.state_batt_kwh_cum = state_capacity_total.state_batt_kwh_cum.astype(np.float64) 
-        df.system_kw_cum = df.system_kw_cum.astype(np.float64)
-        df.batt_kw_cum = df.batt_kw_cum.astype(np.float64)
-        df.batt_kwh_cum = df.batt_kwh_cum.astype(np.float64) 
-        
-        # merge state totals back to agent df
-        df = pd.merge(df, state_capacity_total, how = 'left', on = ['state_abbr', 'sector_abbr', 'year'])
-        
-        # read csv of historical capacity values by state and sector
-        historical_state_df = pd.read_csv(config.OBSERVED_DEPLOYMENT_BY_STATE)
-        
-        # join historical data to agent df
-        df = pd.merge(df, historical_state_df, how='left', on=['state_abbr', 'sector_abbr', 'year'])
-        
-        # calculate scale factor - weight that is given to each agent based on proportion of state total
-        # where state cumulative capacity is 0, proportion evenly to all agents
-        df['solar_scale_factor'] =  np.where(df['state_solar_kw_cum'] == 0, 1.0/df['agent_count'], df['system_kw_cum'] / df['state_solar_kw_cum'])
-        df['batt_mw_scale_factor'] =  np.where(df['state_batt_kw_cum'] == 0, 1.0/df['agent_count'], df['batt_kw_cum'] / df['state_batt_kw_cum'])
-        df['batt_mwh_scale_factor'] =  np.where(df['state_batt_kwh_cum'] == 0, 1.0/df['agent_count'], df['batt_kwh_cum'] / df['state_batt_kwh_cum'])
-        
-        # use scale factor to constrain agent capacity values to historical values
-        df['system_kw_cum'] = df['solar_scale_factor'] * df['observed_solar_mw'] * 1000.
-        df['batt_kw_cum'] = df['batt_mw_scale_factor'] * df['observed_storage_mw'] * 1000.
-        df['batt_kwh_cum'] = df['batt_mwh_scale_factor'] * df['observed_storage_mwh'] * 1000.
-        
-        # recalculate number of adopters using anecdotal values
-        df['number_of_adopters'] = np.where(df['sector_abbr'] == 'res', df['system_kw_cum']/5.0, df['system_kw_cum']/100.0)
-    
-        # recalculate market share
-        df['market_share'] = np.where(df['developable_agent_weight'] == 0, 0.0, 
-                           df['number_of_adopters'] / df['developable_agent_weight'])
-        df['market_share'] = df['market_share'].astype(np.float64)
-        
-        df.drop(['agent_count',
-                 'state_solar_kw_cum','state_batt_kw_cum','state_batt_kwh_cum',
-                 'observed_solar_mw','observed_storage_mw','observed_storage_mwh',
-                 'solar_scale_factor','batt_mw_scale_factor','batt_mwh_scale_factor'], axis=1, inplace=True)
-    
-    market_last_year = df[['agent_id',
-                            'market_share','max_market_share','number_of_adopters',
-                            'market_value','initial_number_of_adopters','initial_pv_kw','initial_batt_kw','initial_batt_kwh',
-                            'initial_market_share','initial_market_value',
-                            'system_kw_cum','new_system_kw',
-                            'batt_kw_cum','new_batt_kw',
-                            'batt_kwh_cum','new_batt_kwh']]
+        state_tot = (
+            df[group_cols + ['system_kw_cum', 'agent_id']]
+              .groupby(group_cols)
+              .agg({'system_kw_cum': 'sum', 'agent_id': 'count'})
+              .rename(columns={'system_kw_cum': 'state_solar_kw_cum', 'agent_id': 'agent_count'})
+              .reset_index()
+        )
 
-    market_last_year.rename(columns={'market_share':'market_share_last_year', 
-                               'max_market_share':'max_market_share_last_year',
-                               'number_of_adopters':'adopters_cum_last_year',
-                               'market_value': 'market_value_last_year',
-                               'system_kw_cum':'system_kw_cum_last_year',
-                               'batt_kw_cum':'batt_kw_cum_last_year',
-                               'batt_kwh_cum':'batt_kwh_cum_last_year'}, inplace=True)
+        # coerce
+        state_tot.state_solar_kw_cum = state_tot.state_solar_kw_cum.astype(np.float64)
+        df.system_kw_cum = df.system_kw_cum.astype(np.float64)
+
+        # merge totals and observed PV only; DO NOT scale battery here
+        df = pd.merge(df, state_tot, how='left', on=group_cols)
+        historical_state_df = pd.read_csv(config.OBSERVED_DEPLOYMENT_BY_STATE)                
+        df = pd.merge(df, historical_state_df, how='left', on=['state_abbr', 'sector_abbr', 'year'])
+
+        # PV scale factor and rescale system_kw_cum to observed_solar_mw
+        df['solar_scale_factor'] = np.where(
+            df['state_solar_kw_cum'] == 0, 1.0 / df['agent_count'], df['system_kw_cum'] / df['state_solar_kw_cum']
+        )                                                                                    
+        df['system_kw_cum'] = df['solar_scale_factor'] * df['observed_solar_mw'] * 1000.0       
+
+        # Recompute adopters and market share from PV rescale (battery untouched)
+        df['number_of_adopters'] = np.where(
+            df['sector_abbr'] == 'res', df['system_kw_cum'] / 5.0, df['system_kw_cum'] / 100.0
+        )                                                                                  
+        df['market_share'] = np.where(
+            df['developable_agent_weight'] == 0, 0.0, df['number_of_adopters'] / df['developable_agent_weight']
+        ).astype(np.float64)                                                       
+
+        df.drop(['agent_count', 'state_solar_kw_cum', 'observed_solar_mw',
+                 'solar_scale_factor'], axis=1, inplace=True)
+
+    # Market-last-year handoff (battery fields passed through for now; will be overwritten post-diffusion)
+    market_last_year = df[[
+        'agent_id',
+        'market_share', 'max_market_share', 'number_of_adopters',
+        'market_value', 'initial_number_of_adopters', 'initial_pv_kw', 'initial_batt_kw', 'initial_batt_kwh',
+        'initial_market_share', 'initial_market_value',
+        'system_kw_cum', 'new_system_kw',
+        'batt_kw_cum', 'new_batt_kw',
+        'batt_kwh_cum', 'new_batt_kwh'
+    ]]                                                  
+
+    market_last_year.rename(columns={
+        'market_share': 'market_share_last_year',
+        'max_market_share': 'max_market_share_last_year',
+        'number_of_adopters': 'adopters_cum_last_year',
+        'market_value': 'market_value_last_year',
+        'system_kw_cum': 'system_kw_cum_last_year',
+        'batt_kw_cum': 'batt_kw_cum_last_year',
+        'batt_kwh_cum': 'batt_kwh_cum_last_year'
+    }, inplace=True)    
 
     return df, market_last_year
 
