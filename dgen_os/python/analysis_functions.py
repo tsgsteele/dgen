@@ -30,10 +30,11 @@ NEEDED_COLS = [
     # Cohort/cumulative adopters:
     "new_adopters",           # new adopters in that year (cohort size)
     "number_of_adopters",     # cumulative adopters in that year
+    "customers_in_bin",
 
     # Savings and pricing:
     "first_year_elec_bill_savings",
-    "avg_elec_price_cents_per_kwh",
+    "price_per_kwh",
 
     # Tech potential / market share:
     "customers_in_bin",
@@ -755,7 +756,7 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
     # --- numeric coercions / fills ---
     for c in ("year","new_adopters","number_of_adopters","first_year_elec_bill_savings",
               "customers_in_bin","max_market_share","system_kw","new_system_kw",
-              "system_kw_cum","batt_kwh","batt_kwh_cum","avg_elec_price_cents_per_kwh",
+              "system_kw_cum","batt_kwh","batt_kwh_cum","price_per_kwh",
               "initial_batt_kwh"):
         if c in x.columns:
             x[c] = pd.to_numeric(x[c], errors="coerce")
@@ -849,26 +850,26 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
 
     # --- avg price 2026 (unchanged) ---
     if (
-        "avg_elec_price_cents_per_kwh" in x.columns
+        "price_per_kwh" in x.columns
         and "customers_in_bin" in x.columns
-        and x["avg_elec_price_cents_per_kwh"].notna().any()
+        and x["price_per_kwh"].notna().any()
     ):
         price_2026 = x[(x["year"] == 2026) & (x["scenario"] == "baseline")].copy()
         price_2026["customers_in_bin"] = price_2026["customers_in_bin"].fillna(0.0).clip(lower=0.0)
 
         def _weighted_avg(g: pd.DataFrame) -> float:
             w = g["customers_in_bin"].to_numpy()
-            v = g["avg_elec_price_cents_per_kwh"].to_numpy()
+            v = g["price_per_kwh"].to_numpy()
             ws = w.sum()
             return float(np.average(v, weights=w)) if ws > 0 else np.nan
 
         avg_price_2026_model = (
             price_2026.groupby("state_abbr", as_index=False)
                       .apply(_weighted_avg)
-                      .rename(columns={None: "avg_elec_price_cents_per_kwh"})
+                      .rename(columns={None: "price_per_kwh"})
         )
     else:
-        avg_price_2026_model = pd.DataFrame(columns=["state_abbr","avg_elec_price_cents_per_kwh"])
+        avg_price_2026_model = pd.DataFrame(columns=["state_abbr","price_per_kwh"])
 
     # --- market share (unchanged) ---
     x["market_potential"] = x["customers_in_bin"] * x["max_market_share"]
