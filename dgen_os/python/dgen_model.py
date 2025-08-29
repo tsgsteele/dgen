@@ -607,6 +607,17 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                 # 2) Allocate **integer** battery adopters for THIS year and compute new/cum batt capacity
                 solar_agents.df = _allocate_battery_adopters_integer(solar_agents.df, year)
 
+                # 2a) Swap in cumulative battery capacity from the battery adoption allocation
+                # --- simplest per-agent update of battery cumulatives for next year's handoff ---
+                ml  = market_last_year_df.set_index("agent_id")
+                cur = solar_agents.df.set_index("agent_id")[["batt_kw_cum", "batt_kwh_cum"]]
+
+                # write the updated cumulatives into the "last_year" fields (by agent_id)
+                ml.loc[cur.index, "batt_kw_cum_last_year"]  = cur["batt_kw_cum"].to_numpy()
+                ml.loc[cur.index, "batt_kwh_cum_last_year"] = cur["batt_kwh_cum"].to_numpy()
+
+                market_last_year_df = ml.reset_index()
+
                 # 3) Export state-level hourly net using the actual cumulative mix (PV-only vs PV+Batt)
                 export_state_hourly_with_storage_mix(engine, schema, owner, year, solar_agents.df)
 
