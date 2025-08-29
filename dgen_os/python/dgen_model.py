@@ -639,7 +639,8 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                     'diffusion_market_share','new_market_value','market_value',
                     'total_gen_twh','tariff_dict','deprec_sch','cash_flow',
                     'cbi','ibi','pbi','cash_incentives','state_incentives',
-                    'export_tariff_results'
+                    'export_tariff_results', 'baseline_net_hourly', 'adopter_net_hourly_pvonly',
+                    'adopter_net_hourly_with_batt', 'adopter_net_hourly', 'wholesale_prices'
                 ] if f in solar_agents.df.columns]
                 df_write = solar_agents.df.drop(drop_list, axis=1)
                 df_write.to_pickle(os.path.join(out_scen_path, f'agent_df_{year}.pkl'))
