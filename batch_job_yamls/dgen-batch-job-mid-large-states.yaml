@@ -14,6 +14,8 @@ taskGroups:
           DB_PASS: "postgres"
           DB_NAME: "dgendb"
           INSTANCE_CONNECTION_NAME: "dgen-466702:us-east1:dgen-db"
+          USE_PRIVATE_IP_DIRECT: "1"
+          DB_PRIVATE_IP : "10.80.160.3"
           PG_CONN_STRING: >
             host=/cloudsql/dgen-466702:us-east1:dgen-db
             port=5432
@@ -72,3 +74,8 @@ taskGroups:
         cpuMilli: 56000            #16 vCPUs
         memoryMib: 114688           # 32 GiB
         bootDiskMib: 100000         # 100 gb boot disk
+allocationPolicy:
+  network:
+    networkInterfaces:
+      - network: "projects/dgen-466702/global/networks/default"
+        subnetwork: "projects/dgen-466702/regions/us-east1/subnetworks/default"

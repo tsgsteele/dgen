@@ -308,7 +308,7 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
             nem_selected_scenario = datfunc.get_selected_scenario(con, schema)
             rate_switch_table = agent_mutation.elec.get_rate_switch_table(con)
 
-            if os.environ.get('PG_CONN_STRING'):
+            if os.environ.get('USE_PRIVATE_IP_DIRECT'):
                 deprec_sch = pd.read_sql_table(
                     "deprec_sch_FY19",
                     con=engine,
