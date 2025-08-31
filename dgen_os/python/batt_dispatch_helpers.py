@@ -76,9 +76,10 @@ def configure_retail_rate_dispatch(
     - Uses provided PV/load forecasts with a specified look-ahead horizon.
     """
     bd = batt.BatteryDispatch
+    bc = batt.BatteryCell
 
     # Core mode
-    bd.batt_dispatch_choice = 0  # Peak-shaving
+    bd.batt_dispatch_choice = 4  # Peak-shaving
 
     # Forecast controls (SAM uses these to plan charge/discharge)
     bd.batt_dispatch_load_forecast_choice = load_forecast_choice
@@ -90,6 +91,7 @@ def configure_retail_rate_dispatch(
     bd.batt_dispatch_auto_can_gridcharge = 1 if allow_grid_charge else 0
     bd.batt_dispatch_charge_only_system_exceeds_load = 1 if charge_only_when_surplus else 0
     bd.batt_dispatch_discharge_only_load_exceeds_system = 0  # allow discharge even if load > PV
+    bc.batt_minimum_SOC = .10
     # Behind-the-meter export permission
     try:
         bd.batt_dispatch_auto_btm_can_discharge_to_grid = 1 if allow_export else 0

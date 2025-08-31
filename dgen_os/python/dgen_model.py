@@ -84,13 +84,14 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                 agent_file_status, input_name='agent_file'
             )
             # Subset to only single family and no renters
-            # solar_agents.df = (
-            #     solar_agents.df[
-            #         (solar_agents.df['owner_occupancy_status'] == 1) &
-            #         (solar_agents.df['crb_model'] != "Multi-Family with 5+ Units")
+            solar_agents.df = (
+                solar_agents.df[
+                    (solar_agents.df['owner_occupancy_status'] == 1) &
+                    (solar_agents.df['crb_model'] != "Multi-Family with 5+ Units") &
+                    (solar_agents.df['county_id'].isin(["2669", "2393", "251"]))
 
-            #     ]
-            # )
+                ]
+            )
             cols_base = list(solar_agents.df.columns)
 
         if scenario_settings.techs == ['solar']:
@@ -221,6 +222,12 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                                                     input_name='batt_tech_performance', csv_import_function=iFuncs.stacked_sectors)
                 value_of_resiliency = iFuncs.import_table(scenario_settings, con, engine, owner,
                                                         input_name='value_of_resiliency', csv_import_function=None)
+                
+            # ensure tables exist in the scenario schema (parent process)
+            with con.cursor() as cur:
+                cur.execute(f'SET search_path TO "{schema}"')
+                financial_functions._ensure_econ_tables(cur)
+                con.commit()
 
             # per-year loop
             for year in scenario_settings.model_years:
@@ -297,7 +304,7 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                     pool = ctx.Pool(
                         processes=cores,
                         initializer=_init_worker,
-                        initargs=(model_settings.pg_conn_string, model_settings.role)
+                        initargs=(model_settings.pg_conn_string, model_settings.role, schema)  # + schema
                     )
 
                     worker_pids = [p.pid for p in pool._pool]
