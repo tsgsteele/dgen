@@ -820,13 +820,15 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
     else:
         median_storage = pd.DataFrame(columns=["state_abbr", "year", "scenario", "median_batt_kwh"])
 
-    # --- totals (DIRECTLY from model outputs; no attachment-rate math) ---
+    # --- totals (DIRECTLY from model outputs; now includes new_adopters + new_system_kw) ---
     totals = (
         x.groupby(["state_abbr","year","scenario"], as_index=False)
          .agg(
+             new_adopters=("new_adopters","sum"),                 # <-- added
+             new_system_kw=("new_system_kw","sum"),               # <-- optional convenience
+             number_of_adopters=("number_of_adopters","sum"),
              system_kw_cum=("system_kw_cum","sum"),
              batt_kwh_cum=("batt_kwh_cum","sum"),
-             number_of_adopters=("number_of_adopters","sum"),
          )
     )
 
@@ -889,7 +891,7 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
     return {
         "median_system_kw": median_kw,
         "median_storage_kwh": median_storage,
-        "totals": totals,  # uses model's batt_kwh_cum directly
+        "totals": totals,  # now also has new_adopters + new_system_kw
         "tech_2040": tech_2040,
         "portfolio_annual_savings": portfolio_annual,
         "cumulative_bill_savings": cumulative_savings,
