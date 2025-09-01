@@ -632,10 +632,18 @@ def facet_state_peak_timeseries_from_hourly(
 # =============================================================================
 
 @dataclass
+@dataclass
 class SavingsConfig:
-    """Configuration for bill savings aggregation."""
+    """Configuration for bill savings aggregation.
+
+    bill_savings_annual_escalation_pct:
+        Expected constant annual percentage change applied to each cohort's
+        first-year bill savings in subsequent years.
+        Example: 3% per year => 0.03. Default 0.0 (no escalation).
+    """
     lifetime_years: int = 25
     cap_to_horizon: bool = False
+    bill_savings_annual_escalation_pct: float = 0.0  # e.g., 0.03 for +3%/yr
 
 
 def compute_portfolio_and_cumulative_savings(
@@ -643,19 +651,42 @@ def compute_portfolio_and_cumulative_savings(
     cfg: SavingsConfig
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Compute portfolio-level bill savings by carrying cohorts forward.
+    Compute portfolio-level bill savings by carrying cohorts forward with optional escalation.
+
+    Escalation model:
+      - Each cohort contributes its first-year bill savings * escalated by a constant
+        annual rate g = cfg.bill_savings_annual_escalation_pct in years after adoption.
+      - Annual portfolio in year y sums all active cohorts' escalated annual savings:
+            sum_{cohort_year <= y} base_cohort_annual * (1+g)^(y - cohort_year)
+      - Cumulative bill savings is the cumsum of that annual portfolio series.
+      - Lifetime savings for each cohort uses a geometric sum over L credited years:
+            base_cohort_annual * [((1+g)^L - 1) / g]   (and = base*L when g=0)
+
+    Notes:
+      - Annual portfolio is naturally capped by the input horizon [min(year), max(year)].
+      - Lifetime crediting uses cfg.lifetime_years, optionally capped to horizon if
+        cfg.cap_to_horizon=True.
     """
+    # Empty guard
     if df.empty:
-        empty_annual = pd.DataFrame(columns=["state_abbr", "scenario", "year", "portfolio_annual_savings", "lifetime_savings_total"])
-        empty_cum = pd.DataFrame(columns=["state_abbr", "scenario", "year", "cumulative_bill_savings", "lifetime_savings_total"])
+        empty_annual = pd.DataFrame(columns=["state_abbr", "scenario", "year",
+                                             "portfolio_annual_savings", "lifetime_savings_total"])
+        empty_cum = pd.DataFrame(columns=["state_abbr", "scenario", "year",
+                                          "cumulative_bill_savings", "lifetime_savings_total"])
         return empty_annual, empty_cum
 
+    # Basic typing & base cohort annual savings
     x = df.copy()
     x["new_adopters"] = pd.to_numeric(x.get("new_adopters", 0.0), errors="coerce").fillna(0.0)
-    x["first_year_elec_bill_savings"] = pd.to_numeric(x.get("first_year_elec_bill_savings", 0.0), errors="coerce").fillna(0.0)
+    x["first_year_elec_bill_savings"] = pd.to_numeric(
+        x.get("first_year_elec_bill_savings", 0.0), errors="coerce"
+    ).fillna(0.0)
+    x["year"] = pd.to_numeric(x.get("year", np.nan), errors="coerce")
 
+    # base (year-of-adoption) cohort annual savings = per-HH first-year savings * cohort size
     x["cohort_annual_savings"] = x["first_year_elec_bill_savings"] * x["new_adopters"]
 
+    # Collapse to one row per cohort (state, scenario, cohort_year)
     cohorts = (
         x.groupby(["state_abbr", "scenario", "year"], as_index=False)["cohort_annual_savings"]
          .sum()
@@ -663,50 +694,83 @@ def compute_portfolio_and_cumulative_savings(
          .sort_values(["state_abbr", "scenario", "cohort_year"])
     )
 
+    # Horizon years present in the input
     year_vals = pd.to_numeric(df["year"], errors="coerce").dropna()
     if year_vals.empty:
-        empty_annual = pd.DataFrame(columns=["state_abbr", "scenario", "year", "portfolio_annual_savings", "lifetime_savings_total"])
-        empty_cum = pd.DataFrame(columns=["state_abbr", "scenario", "year", "cumulative_bill_savings", "lifetime_savings_total"])
+        empty_annual = pd.DataFrame(columns=["state_abbr", "scenario", "year",
+                                             "portfolio_annual_savings", "lifetime_savings_total"])
+        empty_cum = pd.DataFrame(columns=["state_abbr", "scenario", "year",
+                                          "cumulative_bill_savings", "lifetime_savings_total"])
         return empty_annual, empty_cum
 
     year_min = int(year_vals.min())
     year_max = int(year_vals.max())
     all_years = list(range(year_min, year_max + 1))
 
+    g = float(getattr(cfg, "bill_savings_annual_escalation_pct", 0.0) or 0.0)
+    # guard against pathological values (e.g., g <= -1 causes division by zero later)
+    if g <= -0.999999999:
+        g = -0.999999999
+
+    def _geom_factor(growth: float, n_years: int) -> float:
+        """Geometric sum factor for 1 + growth over n_years (>=0)."""
+        if n_years <= 0:
+            return 0.0
+        if abs(growth) < 1e-12:
+            return float(n_years)
+        return float(((1.0 + growth) ** n_years - 1.0) / growth)
+
+    # ---- Annual portfolio with escalation (per state/scenario/year) ----
     annual_frames: List[pd.DataFrame] = []
-    lifetime_frames: List[pd.DataFrame] = []
 
-    for (state, scen), g in cohorts.groupby(["state_abbr", "scenario"]):
-        mapping = dict(zip(g["cohort_year"], g["cohort_annual_savings"]))
+    for (state, scen), gcoh in cohorts.groupby(["state_abbr", "scenario"]):
+        mapping = dict(zip(gcoh["cohort_year"].astype(int), gcoh["cohort_annual_savings"].astype(float)))
 
-        running = 0.0
         rows = []
         for y in all_years:
-            running += mapping.get(y, 0.0)
-            rows.append((state, scen, y, running))
+            total_y = 0.0
+            # sum escalated contributions from all cohorts active by year y
+            for cy, base in mapping.items():
+                if cy <= y:
+                    age = y - cy  # years since adoption (0 in cohort year)
+                    total_y += base * ((1.0 + g) ** age if abs(g) >= 1e-12 else 1.0)
+            rows.append((state, scen, y, total_y))
+
         ann_df = pd.DataFrame(rows, columns=["state_abbr", "scenario", "year", "portfolio_annual_savings"])
         annual_frames.append(ann_df)
-
-        lf = cfg.lifetime_years
-        if cfg.cap_to_horizon:
-            credited = {cy: max(0, min(lf, year_max - cy + 1)) for cy in g["cohort_year"]}
-        else:
-            credited = {cy: lf for cy in g["cohort_year"]}
-
-        g_life = g.copy()
-        g_life["lifetime_years_applied"] = g_life["cohort_year"].map(credited)
-        g_life["lifetime_savings_for_cohort"] = g_life["cohort_annual_savings"] * g_life["lifetime_years_applied"]
-        lifetime_frames.append(
-            g_life.groupby(["state_abbr", "scenario"], as_index=False)["lifetime_savings_for_cohort"]
-                 .sum()
-                 .rename(columns={"lifetime_savings_for_cohort": "lifetime_savings_total"})
-        )
 
     annual_portfolio = (
         pd.concat(annual_frames, ignore_index=True)
         if annual_frames else
         pd.DataFrame(columns=["state_abbr", "scenario", "year", "portfolio_annual_savings"])
     )
+
+    # ---- Lifetime totals with escalation (closed-form geometric sum) ----
+    lifetime_frames: List[pd.DataFrame] = []
+
+    for (state, scen), gcoh in cohorts.groupby(["state_abbr", "scenario"]):
+        lf = int(getattr(cfg, "lifetime_years", 25))
+
+        # Optionally cap credited years to horizon length for each cohort
+        if cfg.cap_to_horizon:
+            credited = {int(cy): max(0, min(lf, year_max - int(cy) + 1)) for cy in gcoh["cohort_year"]}
+        else:
+            credited = {int(cy): lf for cy in gcoh["cohort_year"]}
+
+        # geometric (or linear when g==0) present-value-like accumulator
+        g_life = gcoh.copy()
+        g_life["cohort_year"] = g_life["cohort_year"].astype(int)
+        g_life["lifetime_years_applied"] = g_life["cohort_year"].map(credited)
+        g_life["lifetime_savings_for_cohort"] = g_life.apply(
+            lambda r: float(r["cohort_annual_savings"]) * _geom_factor(g, int(r["lifetime_years_applied"])),
+            axis=1
+        )
+
+        lifetime_frames.append(
+            g_life.groupby(["state_abbr", "scenario"], as_index=False)["lifetime_savings_for_cohort"]
+                 .sum()
+                 .rename(columns={"lifetime_savings_for_cohort": "lifetime_savings_total"})
+        )
 
     lifetime_totals = (
         pd.concat(lifetime_frames, ignore_index=True)
@@ -715,6 +779,7 @@ def compute_portfolio_and_cumulative_savings(
         pd.DataFrame(columns=["state_abbr", "scenario", "lifetime_savings_total"])
     )
 
+    # ---- Cumulative (time path) ----
     if not annual_portfolio.empty:
         annual_portfolio = annual_portfolio.sort_values(["state_abbr", "scenario", "year"])
         cumulative = annual_portfolio.copy()
@@ -724,6 +789,7 @@ def compute_portfolio_and_cumulative_savings(
     else:
         cumulative = pd.DataFrame(columns=["state_abbr", "scenario", "year", "cumulative_bill_savings"])
 
+    # Attach lifetime totals to both frames (like before)
     annual_portfolio = annual_portfolio.merge(lifetime_totals, on=["state_abbr", "scenario"], how="left")
     cumulative = cumulative.merge(lifetime_totals, on=["state_abbr", "scenario"], how="left")
 
