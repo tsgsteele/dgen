@@ -3,7 +3,7 @@ logsPolicy:
 
 taskGroups:
   - taskCount: "27"               # one task per state
-    parallelism: "3"             # run all states in parallel
+    parallelism: "9"             # run all states in parallel
     schedulingPolicy: AS_SOON_AS_POSSIBLE
 
     taskSpec:
@@ -22,7 +22,7 @@ taskGroups:
             dbname=dgendb
             user=postgres
             password=postgres
-          LOCAL_CORES: "32"
+          LOCAL_CORES: "16"
 
       runnables:
       - container:
@@ -71,9 +71,8 @@ taskGroups:
               python /opt/dgen_os/python/dgen_model.py
 
       computeResource:
-        cpuMilli: 32000            #16 vCPUs
-        memoryMib: 65536           # 32 GiB
-        bootDiskMib: 100000         # 100 mb boot disk
+        cpuMilli: 16000            #16 vCPUs
+        memoryMib: 32768           # 32 GiB
 allocationPolicy:
   network:
     networkInterfaces:

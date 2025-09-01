@@ -192,7 +192,7 @@ def calc_system_performance(
         process_tariff(utilityrate, td_norm, net_billing_sell_rate, ts_sell_rate=ts_sell)
 
         # Hand gen to the rate engine
-        utilityrate.SystemOutput.gen = gen
+        utilityrate.SystemOutput.gen = batt.SystemOutput.gen
 
         # Wire up loan pieces for battery case
         loan.BatterySystem.en_batt = 1

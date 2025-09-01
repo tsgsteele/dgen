@@ -271,7 +271,7 @@ def make_engine(pg_engine_con):
     print(f"[make_engine] Using URL: {url}", flush=True)
     return create_engine(
         url,
-        pool_size=1, max_overflow=0, pool_pre_ping=True, pool_recycle=300
+        pool_size=5, max_overflow=0, pool_pre_ping=True, pool_recycle=300
     )
 
 

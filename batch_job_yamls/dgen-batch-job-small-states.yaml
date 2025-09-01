@@ -73,7 +73,6 @@ taskGroups:
       computeResource:
         cpuMilli: 8000            # 8 vCPUs
         memoryMib: 16384           # 16 GiB
-        bootDiskMib: 100000         # 100 mb boot disk
 allocationPolicy:
   network:
     networkInterfaces:
