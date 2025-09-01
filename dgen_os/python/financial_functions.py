@@ -488,13 +488,13 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     kwh_w        = getattr(batt.Outputs, "batt_bank_installed_capacity", 0.0)
 
     load_w_ts = np.asarray(getattr(utilityrate.Load, "load", []), dtype=float)
-    _sys_w_raw = getattr(utilityrate.Outputs, "year1_hourly_system_to_load", None)  # PV+Batt → load
+    _sys_w_raw = getattr(batt.Outputs, "system_to_load", None)  # PV+Batt → load
     if _sys_w_raw is None or (hasattr(_sys_w_raw, "__len__") and len(_sys_w_raw) == 0):
         _sys_w_raw = getattr(utilityrate.SystemOutput, "gen", [])
     sys_to_load_w  = np.asarray(_sys_w_raw, dtype=float)
 
     # *** Net import from grid (PV+Batt) — authoritative ***
-    e_fromgrid_w = np.asarray(getattr(utilityrate.Outputs, "year1_hourly_e_fromgrid", []), dtype=float)
+    e_fromgrid_w = np.asarray(getattr(batt.Outputs, "grid_to_load", []), dtype=float)
 
     first_with_w    = out_w_util.get('utility_bill_w_sys_year1', 0.0)
     first_without_w = out_w_util.get('utility_bill_wo_sys_year1', 0.0)
