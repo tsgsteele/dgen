@@ -3,7 +3,7 @@ logsPolicy:
 
 taskGroups:
   - taskCount: "27"               # one task per state
-    parallelism: "3"             # run all states in parallel
+    parallelism: "5"             # run all states in parallel
     schedulingPolicy: AS_SOON_AS_POSSIBLE
 
     taskSpec:

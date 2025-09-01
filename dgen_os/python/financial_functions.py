@@ -137,9 +137,9 @@ def calc_system_performance(
         batt.BatterySystem.batt_replacement_option = 0
         batt.batt_minimum_SOC = 10
 
-        pv_to_batt_ratio = 1
+        pv_to_batt_ratio = 0.75
         batt_capacity_to_power_ratio = 2.0
-        desired_size  = 8
+        desired_size  = kw / pv_to_batt_ratio
         desired_power = desired_size / batt_capacity_to_power_ratio
         desired_voltage = 500 if agent.loc['sector_abbr'] != 'res' else 240
         battery_tools.battery_model_sizing(
@@ -175,13 +175,18 @@ def calc_system_performance(
             one_time_charge = 0.0
 
         # Build Utilityrate5 from switched tariff
-        net_billing_sell_rate = 0.0 
-        ts_sell = np.asarray(agent.loc['wholesale_prices'], dtype=float).ravel() * agent.loc['elec_price_multiplier']
+        net_billing_sell_rate = 0
+        # [NEM3] Only CA: disable TS sell so TOU sell column is used
+        is_ca = str(agent.get('state_abbr', '')).upper() == 'CA'  # [NEM3]
+        ts_sell = (                        
+            np.asarray(agent.loc['wholesale_prices'], dtype=float).ravel() * agent.loc['elec_price_multiplier']
+        )
         td_norm = normalize_tariff(agent.loc['tariff_dict'], net_sell_rate_scalar=net_billing_sell_rate)
+        if is_ca: td_norm['ur_metering_option'] = 2
         process_tariff(utilityrate, td_norm, net_billing_sell_rate, ts_sell_rate=ts_sell)
 
         # Hand gen to the rate engine
-        utilityrate.SystemOutput.gen = gen
+        utilityrate.SystemOutput.gen = batt.SystemOutput.gen
 
         # Wire up loan pieces for battery case
         loan.BatterySystem.en_batt = 1
@@ -205,7 +210,7 @@ def calc_system_performance(
             system_costs = costs['system_capex_per_kw'] * kw
 
         #loan.SystemCosts.om_production1_values = batt.Outputs.batt_annual_discharge_energy
-        batt_costs = costs['batt_capex_per_kwh_combined'] * batt.Outputs.batt_bank_installed_capacity * .7 # For the investment tax credit
+        batt_costs = costs['batt_capex_per_kwh_combined'] * batt.Outputs.batt_bank_installed_capacity
         value_of_resiliency = agent.loc['value_of_resiliency_usd']
 
     else:
@@ -228,9 +233,14 @@ def calc_system_performance(
             one_time_charge = 0.0
 
         # Rebuild Utilityrate5 FROM the switched tariff (TOU + schedules)
+        # [NEM3] Only CA: disable TS sell so TOU sell column is used
         net_billing_sell_rate = 0
-        ts_sell = np.asarray(agent.loc['wholesale_prices'], dtype=float).ravel() * agent.loc['elec_price_multiplier']
+        is_ca = str(agent.get('state_abbr', '')).upper() == 'CA' 
+        ts_sell = (                      
+            np.asarray(agent.loc['wholesale_prices'], dtype=float).ravel() * agent.loc['elec_price_multiplier']
+        )
         td_norm = normalize_tariff(agent.loc['tariff_dict'], net_sell_rate_scalar=net_billing_sell_rate)
+        if is_ca: td_norm['ur_metering_option'] = 2
         process_tariff(utilityrate, td_norm, net_billing_sell_rate, ts_sell_rate=ts_sell)
 
         utilityrate.SystemOutput.gen = gen
@@ -269,9 +279,7 @@ def calc_system_performance(
     loan.SystemCosts.total_installed_cost = direct_costs + sales_tax + one_time_charge
 
     # ITC for batteries
-    itc_batt_basis = batt_costs  # or narrow to the portion of batt costs you deem eligible
     loan.TaxCreditIncentives.itc_fed_percent = [0.0]      # don't double count via percent
-    loan.TaxCreditIncentives.itc_fed_amount  = [0.30 * itc_batt_basis]
 
     loan.execute()
     return -loan.Outputs.npv
@@ -328,8 +336,11 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     utilityrate.ElectricityRates.en_electricity_rates = 1
 
     # Initial tariff load (pre-switch); rebuild again inside calc_system_performance after a switch.
-    ts_sell = np.asarray(agent.loc['wholesale_prices'], dtype=float).ravel() * agent.loc['elec_price_multiplier']
-    tariff_dict = normalize_tariff(agent.loc['tariff_dict'], net_sell_rate_scalar=net_sell)
+    is_ca = str(agent.get('state_abbr', '')).upper() == 'CA'
+    ts_sell = (np.asarray(agent.loc['wholesale_prices'], dtype=float).ravel()
+                                  * agent.loc['elec_price_multiplier'])
+    tariff_dict = normalize_tariff(agent.loc['tariff_dict'], net_sell_rate_scalar=0.0)
+    if is_ca: tariff_dict['ur_metering_option'] = 2
     utilityrate = process_tariff(utilityrate, tariff_dict, net_sell, ts_sell_rate=ts_sell)
 
     # Loan parameters
@@ -948,7 +959,7 @@ def normalize_tariff(raw, net_sell_rate_scalar=0.0, debug=False):
 
     # Force Net Billing if configured, else honor input (0=NM, 1=Net Billing, 2=BA/SA)
     mo_in = int(td.get('ur_metering_option', 0))
-    out['ur_metering_option'] = 1 if FORCE_NET_BILLING else mo_in
+    out['ur_metering_option'] = 2 if FORCE_NET_BILLING else mo_in
 
     # Fixed charge (accept legacy key too)
     fc = td.get('ur_monthly_fixed_charge', td.get('fixed_charge', 0.0))

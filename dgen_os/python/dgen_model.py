@@ -84,13 +84,13 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                 agent_file_status, input_name='agent_file'
             )
             # Subset to only single family and no renters
-            # solar_agents.df = (
-            #     solar_agents.df[
-            #         (solar_agents.df['owner_occupancy_status'] == 1) &
-            #         (solar_agents.df['crb_model'] != "Multi-Family with 5+ Units")
+            solar_agents.df = (
+                solar_agents.df[
+                    (solar_agents.df['owner_occupancy_status'] == 1) &
+                    (solar_agents.df['crb_model'] != "Multi-Family with 5+ Units")
 
-            #     ]
-            # )
+                ]
+            )
             cols_base = list(solar_agents.df.columns)
 
         if scenario_settings.techs == ['solar']:
@@ -441,7 +441,7 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                     'diffusion_market_share','new_market_value','market_value',
                     'total_gen_twh','tariff_dict','deprec_sch','cash_flow',
                     'cbi','ibi','pbi','cash_incentives','state_incentives',
-                    'export_tariff_results'
+                    'export_tariff_results', 'wholesale_prices', 'baseline_net_hourly', 'adopter_net_hourly'
                 ] if f in solar_agents.df.columns]
                 df_write = solar_agents.df.drop(drop_list, axis=1)
                 df_write.to_pickle(os.path.join(out_scen_path, f'agent_df_{year}.pkl'))
