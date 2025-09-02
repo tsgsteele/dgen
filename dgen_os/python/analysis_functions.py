@@ -1640,3 +1640,77 @@ __all__ = [
     # Other
     "bar_tech_potential_2040",
 ]
+
+def export_compiled_results_to_excel(
+    outputs: Dict[str, pd.DataFrame],
+    run_id: str,
+    base_dir: str = "/Volumes/Seagate Portabl/permit_power/dgen_runs",
+    peaks_df: Optional[pd.DataFrame] = None,
+    include_national: bool = True,
+) -> str:
+    """
+    Write the collection of tables in `outputs` to a single Excel workbook:
+      /Volumes/Seagate Portabl/permit_power/dgen_runs/compiled_results/{run_id}.xlsx
+
+    - One sheet per key in `outputs` (skips empty frames).
+    - Optional: add 'national_totals' and 'national_deltas' using the helpers in this file.
+    - Optional: add a 'peaks' sheet if peaks_df is provided.
+
+    Returns the full path to the written .xlsx file.
+    """
+    import datetime
+    import pandas as pd
+    import os
+    import re
+
+    # Ensure destination folder exists
+    compiled_dir = os.path.join(base_dir, "compiled_results")
+    os.makedirs(compiled_dir, exist_ok=True)
+    out_path = os.path.join(compiled_dir, f"{run_id}.xlsx")
+
+    # Simple Excel-safe sheet name
+    def _sheet_name(name: str) -> str:
+        # Excel: max 31 chars, avoid weird symbols
+        cleaned = re.sub(r"[^A-Za-z0-9 _\-]", "_", str(name))
+        return cleaned[:31] if cleaned else "Sheet"
+
+    # Assemble optional national tables
+    nat_totals = None
+    nat_deltas = None
+    if include_national:
+        try:
+            nat_totals = build_national_totals(outputs, peaks_df=peaks_df)
+        except Exception:
+            nat_totals = None
+        try:
+            nat_deltas = build_national_deltas(outputs)
+        except Exception:
+            nat_deltas = None
+
+    # Write everything
+    with pd.ExcelWriter(out_path, engine="xlsxwriter") as xw:
+        # Small README/metadata sheet
+        meta = pd.DataFrame({
+            "run_id": [run_id],
+            "generated_at": [datetime.datetime.now().isoformat(timespec="seconds")],
+            "tables_included": [", ".join(sorted([k for k, v in outputs.items() if isinstance(v, pd.DataFrame) and not v.empty]))]
+        })
+        meta.to_excel(xw, index=False, sheet_name=_sheet_name("README"))
+
+        # Core outputs
+        for key, df in outputs.items():
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                df.to_excel(xw, index=False, sheet_name=_sheet_name(key))
+
+        # Optional extras
+        if peaks_df is not None and isinstance(peaks_df, pd.DataFrame) and not peaks_df.empty:
+            peaks_df.to_excel(xw, index=False, sheet_name=_sheet_name("peaks"))
+
+        if include_national and isinstance(nat_totals, pd.DataFrame) and not nat_totals.empty:
+            nat_totals.to_excel(xw, index=False, sheet_name=_sheet_name("national_totals"))
+
+        if include_national and isinstance(nat_deltas, pd.DataFrame) and not nat_deltas.empty:
+            nat_deltas.to_excel(xw, index=False, sheet_name=_sheet_name("national_deltas"))
+
+    return out_path
+
