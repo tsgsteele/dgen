@@ -143,34 +143,17 @@ def _resolve_hourly_buy_prices(ER) -> np.ndarray:
     return prices.astype(float)
 
 def _attach_hourly_prices(utilityrate, util_out: dict) -> dict:
-    """
-    Populate util_out with an hourly utility price series in USD/kWh,
-    computed via PySAM.Utilityrateforecast (NREL example style).
-
-    Notes:
-    - Uses the *configured* Utilityrate5 object's ElectricityRates settings.
-    - Sets analysis_period=1, steps_per_hour=1 (8760 points).
-    - Follows the NREL "forecast" pattern: grid_power = -1 * load.
-    - Fixed charges are not included in the price stream.
-    """
     import numpy as np
     import PySAM.Utilityrateforecast as utility_rate_forecast
 
-    # Build forecast object
     rf = utility_rate_forecast.new()
-
-    # Lifetime / steps
-    try:
-        infl = float(getattr(utilityrate.Lifetime, "inflation_rate", 0.0))
-    except Exception:
-        infl = 0.0
     rf.value("analysis_period", 1)
-    rf.value("inflation_rate", infl)   # percent (e.g., 2.5)
+    rf.value("inflation_rate", float(getattr(utilityrate.Lifetime, "inflation_rate", 0.0)))
     rf.value("steps_per_hour", 1)
 
-    # Copy relevant ElectricityRates fields over (best-effort)
+    # Copy relevant ElectricityRates settings
     ER = utilityrate.ElectricityRates
-    _keys = [
+    for k in [
         "ur_metering_option",
         "ur_monthly_fixed_charge",
         "ur_ec_tou_mat", "ur_ec_sched_weekday", "ur_ec_sched_weekend",
@@ -179,37 +162,25 @@ def _attach_hourly_prices(utilityrate, util_out: dict) -> dict:
         "TOU_demand_single_peak",
         "ur_dc_enable", "ur_dc_sched_weekday", "ur_dc_sched_weekend",
         "ur_dc_flat_mat", "ur_dc_tou_mat",
-    ]
-    for k in _keys:
+    ]:
         try:
             rf.value(k, getattr(ER, k))
         except Exception:
-            pass  # some fields may not exist / be unset; that's fine
+            pass
 
-    # Build time series inputs following the NREL example
+    # Use baseline load only (no PV/battery) to let the engine map tiers correctly
     load = np.asarray(getattr(utilityrate.Load, "load", []), dtype=float).ravel()
-    gen  = np.asarray(getattr(utilityrate.SystemOutput, "gen", []), dtype=float).ravel()
-    if gen.size == 0:
-        gen = np.zeros_like(load)
-
-    # Forecast engine wants kW series; grid_power negative for import
-    rf.value("gen", gen.tolist())                       # kW
-    rf.value("load", load.tolist())                     # kW
+    rf.value("load", load.tolist())
+    rf.value("gen", np.zeros_like(load).tolist())
     rf.value("grid_power", (-1.0 * load)[:8760].tolist())
     rf.value("idx", 0)
 
-    # Execute and stash the hourly price series
     rf.setup()
     rf.execute()
 
-    try:
-        price_series = rf.export()["Outputs"]["ur_price_series"]
-    except Exception:
-        price_series = []
-
-    if isinstance(price_series, (list, tuple)) and len(price_series) == 8760:
-        # Store as USD/kWh to avoid any confusion with cents
-        util_out["hourly_utility_price_usd_per_kwh"] = [float(x) for x in price_series]
+    # <-- this is the hourly per-kWh buy price
+    prices = rf.export()["Outputs"].get("ur_price_series", [])
+    util_out["hourly_utility_price_usd_per_kwh"] = [float(p) for p in prices]
 
     return util_out
 

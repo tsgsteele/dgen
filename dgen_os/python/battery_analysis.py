@@ -708,8 +708,7 @@ def plot_agent_day(engine: Engine, schema: str, agent_id: int, year: int,
     Typical-day plot for one agent/day.
 
     Left y-axis: kWh flows (PV→load, Batt→load, Grid import/export, PV→batt, Grid→batt, Batt→grid)
-    Right y-axis: Battery SOC (%)
-    Second right y-axis (offset): Utility price (¢/kWh) from utility_price_usd_per_kwh
+    Second right y-axis (offset): Utility BUY price (¢/kWh) from utility_price_usd_per_kwh
     """
     import numpy as np
     import pandas as pd
@@ -719,13 +718,14 @@ def plot_agent_day(engine: Engine, schema: str, agent_id: int, year: int,
     h0 = int(day_index) * 24 + 1
     h1 = h0 + 23
 
-    # variables to pull (add utility_price_usd_per_kwh + energy_charge_with_sys_usd for fallback)
+    # variables to pull
     vars_needed = (
         "system_to_load_kwh",
         "batt_to_load_kwh",
         "grid_import_kwh",
         "grid_export_kwh",
         "system_to_batt_kwh",
+        "utility_price_usd_per_kwh"
         # "batt_soc_pct",
     )
     vars_list = ", ".join([f"'{v}'" for v in vars_needed])
@@ -752,9 +752,10 @@ def plot_agent_day(engine: Engine, schema: str, agent_id: int, year: int,
     for case in ("pv_only", "pv_batt"):
         sub = df[df["scenario_case"] == case]
         if not sub.empty:
-            cases[case] = sub.pivot(index="hour_index", columns="variable", values="value").sort_index()
-            if case == "pv_batt":
-                cases[case]['system_to_load_kwh'] = cases[case]['system_to_load_kwh'] - cases[case]['batt_to_load_kwh']
+            pvt = sub.pivot(index="hour_index", columns="variable", values="value").sort_index()
+            if case == "pv_batt" and "system_to_load_kwh" in pvt and "batt_to_load_kwh" in pvt:
+                pvt["system_to_load_kwh"] = pvt["system_to_load_kwh"] - pvt["batt_to_load_kwh"].fillna(0.0)
+            cases[case] = pvt
     if not cases:
         print("No matching case data.")
         return
@@ -762,10 +763,10 @@ def plot_agent_day(engine: Engine, schema: str, agent_id: int, year: int,
     plt = _matplotlib_import()
     style_map = {
         "system_to_load_kwh": ("PV→load",         "tab:orange", "-"),
-        "batt_to_load_kwh":   ("Batt→load",       "tab:blue",   "--"),
+        "batt_to_load_kwh":   ("Batt→load",       "tab:blue",   "-"),
         "grid_import_kwh":    ("Grid import",     "tab:red",    ":"),
-        "grid_export_kwh":    ("Grid export",     "tab:green",  (0, (3, 1, 1, 1, 1, 1))),
-        "system_to_batt_kwh": ("PV→batt (charge)","tab:purple", "-.")
+        "grid_export_kwh":    ("Grid export",     "tab:orange",  "-."),
+        "system_to_batt_kwh": ("PV→batt (charge)","tab:blue", "-."),
     }
     hours = list(range(24))
     xticks = [0, 6, 12, 18, 23]
@@ -782,27 +783,37 @@ def plot_agent_day(engine: Engine, schema: str, agent_id: int, year: int,
     for case, pivot in cases.items():
         fig, ax = plt.subplots(figsize=(8, 6), layout='constrained')
 
-        # Left axis: energy flows
+        # Left axis: energy flows (your styles preserved)
         for var, (label, color, ls) in style_map.items():
             if var in pivot.columns and len(pivot[var]) == 24:
                 ax.plot(hours, pivot[var].to_numpy(), label=label, color=color, linestyle=ls)
 
-        # First right axis: SOC (%)
-        # soc_ax = ax.twinx()
-        # if "batt_soc_pct" in pivot.columns and len(pivot["batt_soc_pct"]) == 24:
-        #     soc_ax.plot(hours, pivot["batt_soc_pct"].to_numpy(), linewidth=1.5)
-        #     soc_ax.set_ylabel("Battery SOC (%)")
-        #     soc_ax.set_ylim(0, 100)
+        # # --- Second right axis: BUY price (¢/kWh) ---
+        # price_ax = ax.twinx()
+        # price_ax.spines["right"].set_position(("axes", 1.08))  # offset so it doesn't overlap
+        # price_ax.set_frame_on(True)
+        # price_ax.patch.set_visible(False)
+
+        # if "utility_price_usd_per_kwh" in pivot.columns and len(pivot["utility_price_usd_per_kwh"]) == 24:
+        #     price_c_per_kwh = pivot["utility_price_usd_per_kwh"].astype(float).to_numpy() * 100.0
+        #     if np.isfinite(price_c_per_kwh).any():
+        #         price_ax.plot(
+        #             hours, price_c_per_kwh,
+        #             linestyle="--", color="black", alpha=0.65, linewidth=1.5,
+        #             label="BUY price"
+        #         )
+        #         price_ax.set_ylabel("Utility BUY price (¢/kWh)")
 
         # Labels, ticks, legend
         ax.set_xticks(xticks); ax.set_xticklabels(xticklabels)
         ax.set_xlabel("Hour of day"); ax.set_ylabel("kWh")
         ax.set_title(f"Agent {agent_id} — {case} — day {day_index}")
 
-        # Unified legend outside upper-right
+        # Unified legend (flows + price)
         h1, l1 = ax.get_legend_handles_labels()
-        # h2, l2 = soc_ax.get_legend_handles_labels()
-        ax.legend(h1, l1, loc='upper right', ncol=2)
+        # h2, l2 = price_ax.get_legend_handles_labels()
+        # ax.legend(h1 + h2, l1 + l2, loc='upper right', ncol=2)
+        ax.legend(h1, l1, loc='upper right', ncol=2) # If no buy price
 
         plt.show()
     return df
