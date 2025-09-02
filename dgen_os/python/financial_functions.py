@@ -639,12 +639,12 @@ def calc_system_performance(
             loan.SystemCosts.om_batt_capacity_cost = [0.0]
             loan.SystemCosts.om_batt_variable_cost = [0.0]
             loan.SystemCosts.om_batt_replacement_cost = [0.0]
-            system_costs = costs['system_capex_per_kw_combined'] * kw
+            system_costs = (costs['system_capex_per_kw_combined']+1000) * kw
         else:
             loan.SystemCosts.om_batt_capacity_cost = [0.0]
             loan.SystemCosts.om_batt_variable_cost = [0.0]
             loan.SystemCosts.om_batt_replacement_cost = [0.0]
-            system_costs = costs['system_capex_per_kw'] * kw
+            system_costs = (costs['system_capex_per_kw_combined']+1000) * kw
 
         batt_costs = costs['batt_capex_per_kwh_combined'] * batt.Outputs.batt_bank_installed_capacity
         value_of_resiliency = agent.loc['value_of_resiliency_usd']
@@ -678,7 +678,7 @@ def calc_system_performance(
         loan.SystemCosts.add_om_num_types = 0
         loan.SystemCosts.om_batt_replacement_cost = [0.0]
         loan.SystemCosts.om_batt_nameplate = 0
-        system_costs = costs['system_capex_per_kw'] * kw
+        system_costs = (costs['system_capex_per_kw_combined']+1000) * kw
         batt_costs = 0.0
         value_of_resiliency = 0.0
 

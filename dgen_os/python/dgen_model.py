@@ -88,7 +88,8 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                 solar_agents.df[
                     (solar_agents.df['owner_occupancy_status'] == 1) &
                     (solar_agents.df['crb_model'] != "Multi-Family with 5+ Units") &
-                    (solar_agents.df['county_id'].isin(["2669", "2393", "251"]))
+                    # (solar_agents.df['county_id'].isin(["2669", "2393", "251"]))
+                    (solar_agents.df['county_id'].isin(["1467", "61", "1933"])) #If NJ
 
                 ]
             )
