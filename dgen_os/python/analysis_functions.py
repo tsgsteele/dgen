@@ -14,13 +14,13 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
+import geopandas as gpd
 
 
 # =============================================================================
 # Discovery & I/O
 # =============================================================================
 
-# Columns expected in per-state CSVs. Missing columns are added as NaN/0 where appropriate.
 # Columns expected in per-state CSVs. Missing columns are added as NaN/0 where appropriate.
 NEEDED_COLS = [
     "state_abbr",
@@ -1713,4 +1713,222 @@ def export_compiled_results_to_excel(
             nat_deltas.to_excel(xw, index=False, sheet_name=_sheet_name("national_deltas"))
 
     return out_path
+
+def choropleth_pv_delta_gw_policy_vs_baseline(
+    outputs: Dict[str, pd.DataFrame],
+    shapefile_path: str = "../../../data/states.shp",
+    year: int = 2040,
+    k_bins: int = 10,  # Jenks classes
+) -> pd.DataFrame:
+    """
+    Map absolute PV delta in GW:  ΔGW = (Policy_2040 − Baseline_2040) / 1e6.
+
+    Uses outputs["totals"] from process_all_states(...) which already contains
+    state/year/scenario aggregates including system_kw_cum. No CSV reads here.
+
+    Returns a tidy DataFrame with:
+      ['state_abbr','baseline_kw','policy_kw','delta_kw','delta_gw']
+    """
+
+    # ---- grab processed totals (already built upstream) ----
+    totals = outputs.get("totals", pd.DataFrame())
+    if totals.empty:
+        raise ValueError("outputs['totals'] is empty; run process_all_states(...) first.")
+
+    need = {"state_abbr", "year", "scenario", "system_kw_cum"}
+    if not need.issubset(totals.columns):
+        missing = need - set(totals.columns)
+        raise ValueError(f"outputs['totals'] missing columns: {sorted(missing)}")
+
+    s = totals.loc[totals["year"] == year, ["state_abbr", "scenario", "system_kw_cum"]].copy()
+    # pivot to [state] x {baseline, policy}
+    piv = s.pivot_table(index="state_abbr", columns="scenario", values="system_kw_cum", aggfunc="sum")
+    # Make sure expected columns exist
+    for col in ("baseline", "policy"):
+        if col not in piv.columns:
+            piv[col] = np.nan
+
+    df = piv.reset_index().rename_axis(None, axis=1)
+    df["delta_kw"] = df["policy"] - df["baseline"]
+    df["delta_gw"] = df["delta_kw"] / 1_000_000.0
+    df = df.rename(columns={"baseline": "baseline_kw", "policy": "policy_kw"})
+
+    # ---- map join & plot (contiguous U.S.; exclude AK & HI) ----
+    gdf = gpd.read_file(shapefile_path).to_crs("EPSG:5070")
+    if "STUSPS" not in gdf.columns:
+        for c in ("stusps", "STATE_ABBR", "STATE", "STATEFP"):
+            if c in gdf.columns:
+                gdf["STUSPS"] = gdf[c].astype(str).str.upper()
+                break
+    if "STUSPS" not in gdf.columns:
+        raise ValueError("Shapefile must include a 'STUSPS' two-letter state code.")
+
+    gdf["STUSPS"] = gdf["STUSPS"].astype(str).str.upper()
+    gdf = gdf[~gdf["STUSPS"].isin({"AK", "HI", "PR", "GU", "VI", "AS", "MP", "DC"})].copy()
+
+    plot_df = gdf.merge(df.rename(columns={"state_abbr": "STUSPS"}), on="STUSPS", how="left")
+
+    # Jenks (Fisher-Jenks) when available; fallback to quantiles
+    try:
+        import mapclassify  # noqa: F401
+        scheme = "fisher_jenks"
+        plot_kwargs_extra = dict(k=int(k_bins))
+    except Exception:
+        scheme = "quantiles"
+        plot_kwargs_extra = dict(k=int(k_bins))
+
+    fig, ax = plt.subplots(1, 1, figsize=(12, 7))
+    plot_df.plot(
+        column="delta_gw",
+        cmap="Blues",
+        linewidth=0.6,
+        edgecolor="grey",
+        legend=True,
+        scheme=scheme,
+        legend_kwds={"title": f"Policy − Baseline PV in {year} (GW)", 
+                     "ncols":2, "fmt": "{:.1f}", "loc":"lower left"},
+        ax=ax,
+        missing_kwds={"color": "lightgray"},
+        **plot_kwargs_extra,
+    )
+    ax.set_title(f"PV Capacity Δ in {year}: Policy − Baseline (GW) — Contiguous U.S.", fontsize=14)
+    ax.axis("off")
+    plt.tight_layout()
+    plt.show()
+
+    # Tidy table out
+    out = (plot_df[["STUSPS", "baseline_kw", "policy_kw", "delta_kw", "delta_gw"]]
+           .rename(columns={"STUSPS": "state_abbr"})
+           .sort_values("state_abbr")
+           .reset_index(drop=True))
+    return out
+
+def policy_only_bill_price_diffs_after_adoption(
+    root_dir: str,
+    year: int = 2040,
+    level: str = "US",   # "US" or "state"
+    run_id: str | None = None,
+    strict_run_id: bool = True,
+) -> "pd.DataFrame":
+    """
+    Policy-only comparison of bills and prices among adopters in a given year.
+
+    Weighted by adopters:
+      price_with_kwh = sum(bill_with * adopters) / sum(load_kwh * adopters)
+      price_wo_kwh   = sum(bill_wo   * adopters) / sum(load_kwh * adopters)
+
+    Also returns average bill per adopter and differences.
+
+    Returns columns:
+      ['geo','year',
+       'price_with_c_per_kwh','price_wo_c_per_kwh',
+       'diff_price_c_per_kwh','pct_change_price',
+       'avg_bill_with_per_adopter','avg_bill_wo_per_adopter',
+       'diff_avg_bill_per_adopter']
+    """
+    import os
+    import pandas as pd
+    import numpy as np
+
+    # Required columns (assumed present)
+    USECOLS = [
+        "state_abbr", "year", "new_adopters",
+        "first_year_elec_bill_with_system",
+        "first_year_elec_bill_wo_system",
+        "load_kwh_per_customer_in_bin_initial",
+    ]
+
+    # Collect POLICY files only
+    frames = []
+    for state_dir in discover_state_dirs(root_dir):
+        _b_csv, p_csv = find_state_files(state_dir, run_id=run_id, strict_run_id=strict_run_id)
+        if not p_csv:
+            continue
+        df = pd.read_csv(p_csv, usecols=USECOLS)
+        frames.append(df)
+
+    x = pd.concat(frames, ignore_index=True)
+
+    # Focus year + adopters only
+    x = x[x["year"] == year].copy()
+    x = x[x["new_adopters"] > 0].copy()
+
+    # Adoption-weighted totals
+    x["tot_bill_with"] = x["first_year_elec_bill_with_system"] * x["new_adopters"]
+    x["tot_bill_wo"]   = x["first_year_elec_bill_wo_system"]   * x["new_adopters"]
+    x["tot_load"]      = x["load_kwh_per_customer_in_bin_initial"] * x["new_adopters"]
+
+    if level.lower() == "state":
+        g = (x.groupby("state_abbr", as_index=False)
+              [["tot_bill_with","tot_bill_wo","tot_load","new_adopters"]].sum())
+        geo = g["state_abbr"]
+    else:
+        s = x[["tot_bill_with","tot_bill_wo","tot_load","new_adopters"]].sum()
+        g = pd.DataFrame([s])
+        geo = pd.Series(["US"])
+
+    # Prices (USD/kWh) and bills ($/adopter)
+    price_with = g["tot_bill_with"] / g["tot_load"]
+    price_wo   = g["tot_bill_wo"]   / g["tot_load"]
+    avg_with   = g["tot_bill_with"] / g["new_adopters"]
+    avg_wo     = g["tot_bill_wo"]   / g["new_adopters"]
+
+    out = pd.DataFrame({
+        "geo": geo.values,
+        "year": year,
+        "price_with_c_per_kwh": price_with * 100.0,
+        "price_wo_c_per_kwh":   price_wo   * 100.0,
+    })
+    out["diff_price_c_per_kwh"] = out["price_with_c_per_kwh"] - out["price_wo_c_per_kwh"]
+    out["pct_change_price"] = 100.0 * (out["diff_price_c_per_kwh"] / out["price_wo_c_per_kwh"])
+
+    out["avg_bill_with_per_adopter"] = avg_with
+    out["avg_bill_wo_per_adopter"]   = avg_wo
+    out["diff_avg_bill_per_adopter"] = out["avg_bill_with_per_adopter"] - out["avg_bill_wo_per_adopter"]
+
+    return out.sort_values("geo").reset_index(drop=True)
+
+
+def plot_us_cum_adopters_grouped(outputs: Dict[str, pd.DataFrame],
+                                 xticks: Iterable[int] = (2026, 2030, 2035, 2040),
+                                 title: str = "U.S. Cumulative Adopters — Baseline vs Policy (Grouped Bars)") -> pd.DataFrame:
+    """
+    Grouped bar plot of *national cumulative adopters* by year,
+    with Baseline vs Policy as the bar groups.
+
+    Reuses existing national aggregation logic (via build_national_totals in this file).
+
+    Returns the tidy table used for plotting:
+        ['year','scenario','value'] where value = U.S. total cumulative adopters
+    """
+
+    nat = build_national_totals(outputs)
+    if nat.empty:
+        raise ValueError("No national totals found. Run process_all_states(...) first.")
+
+    d = nat[nat["metric"] == "number_of_adopters"].copy()
+    if d.empty:
+        raise ValueError("National totals lack 'number_of_adopters' metric.")
+
+    # Plot
+    plt.figure(figsize=(12, 5), constrained_layout=True)
+    ax = sns.barplot(data=d, x="year", y="value", hue="scenario", errorbar=None, palette=["#a2e0fc", "#1bb3ef"])
+    ax.set_title(title)
+    ax.set_xlabel("Year")
+    ax.set_ylabel("Cumulative adopters (millions)")
+    # ax.set_xticks(list(xticks))
+
+    # annotate bars in millions
+    for c in ax.containers:
+        ax.bar_label(c, labels=[f"{v/1e6:.1f}M" if np.isfinite(v) else "" for v in c.datavalues],
+                     padding=2, fontsize=9)
+
+    plt.legend(title=None, frameon=False)
+    plt.show()
+    return d.sort_values(["year", "scenario"]).reset_index(drop=True)
+
+
+
+
+
 
