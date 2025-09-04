@@ -137,9 +137,9 @@ def calc_system_performance(
         batt.BatterySystem.batt_replacement_option = 0
         batt.batt_minimum_SOC = 10
 
-        pv_to_batt_ratio = 1
+        pv_to_batt_ratio = 0.8
         batt_capacity_to_power_ratio = 2.0
-        desired_size  = 8
+        desired_size  = kw / pv_to_batt_ratio
         desired_power = desired_size / batt_capacity_to_power_ratio
         desired_voltage = 500 if agent.loc['sector_abbr'] != 'res' else 240
         battery_tools.battery_model_sizing(
@@ -176,12 +176,23 @@ def calc_system_performance(
 
         # Build Utilityrate5 from switched tariff
         net_billing_sell_rate = 0.0 
-        ts_sell = np.asarray(agent.loc['wholesale_prices'], dtype=float).ravel() * agent.loc['elec_price_multiplier']
+        # [NEM3] Only CA: disable TS sell so TOU sell column is used
+        is_ca = str(agent.get('state_abbr', '')).upper() == 'CA'  # [NEM3]
+        ts_sell = None if is_ca else (                            # [NEM3]
+            np.asarray(agent.loc['wholesale_prices'], dtype=float).ravel() * agent.loc['elec_price_multiplier']
+        )
         td_norm = normalize_tariff(agent.loc['tariff_dict'], net_sell_rate_scalar=net_billing_sell_rate)
+        # [NEM3] Only CA: set TOU sell (col 6) = 0.25 * buy (col 5)
+        if is_ca and td_norm.get('ur_ec_tou_mat'):               # [NEM3]
+            _tou = np.asarray(td_norm['ur_ec_tou_mat'], dtype=float)
+            if _tou.ndim == 2 and _tou.shape[1] >= 6:
+                _tou[:, 5] = _tou[:, 4] * 0.25
+                td_norm['ur_ec_tou_mat'] = _tou.tolist()
+        if is_ca: td_norm['ur_metering_option'] = 2
         process_tariff(utilityrate, td_norm, net_billing_sell_rate, ts_sell_rate=ts_sell)
 
         # Hand gen to the rate engine
-        utilityrate.SystemOutput.gen = gen
+        utilityrate.SystemOutput.gen = batt.SystemOutput.gen
 
         # Wire up loan pieces for battery case
         loan.BatterySystem.en_batt = 1
@@ -229,8 +240,19 @@ def calc_system_performance(
 
         # Rebuild Utilityrate5 FROM the switched tariff (TOU + schedules)
         net_billing_sell_rate = 0
-        ts_sell = np.asarray(agent.loc['wholesale_prices'], dtype=float).ravel() * agent.loc['elec_price_multiplier']
+        # [NEM3] Only CA: disable TS sell so TOU sell column is used
+        is_ca = str(agent.get('state_abbr', '')).upper() == 'CA'  # [NEM3]
+        ts_sell = None if is_ca else (                            # [NEM3]
+            np.asarray(agent.loc['wholesale_prices'], dtype=float).ravel() * agent.loc['elec_price_multiplier']
+        )
         td_norm = normalize_tariff(agent.loc['tariff_dict'], net_sell_rate_scalar=net_billing_sell_rate)
+        # [NEM3] Only CA: set TOU sell (col 6) = 0.25 * buy (col 5)
+        if is_ca and td_norm.get('ur_ec_tou_mat'):               # [NEM3]
+            _tou = np.asarray(td_norm['ur_ec_tou_mat'], dtype=float)
+            if _tou.ndim == 2 and _tou.shape[1] >= 6:
+                _tou[:, 5] = _tou[:, 4] * 0.25
+                td_norm['ur_ec_tou_mat'] = _tou.tolist()
+        if is_ca: td_norm['ur_metering_option'] = 2
         process_tariff(utilityrate, td_norm, net_billing_sell_rate, ts_sell_rate=ts_sell)
 
         utilityrate.SystemOutput.gen = gen
@@ -247,15 +269,6 @@ def calc_system_performance(
     utilityrate.Load.load = load_hourly
     utilityrate.execute()
 
-    # ---- Financials ----
-    loan = process_incentives(
-        loan,
-        kw,
-        batt.BatterySystem.batt_power_discharge_max_kwdc,
-        batt.Outputs.batt_bank_installed_capacity,
-        gen_hourly,
-        agent
-    )
     loan.FinancialParameters.system_capacity = kw
 
     aev = list(utilityrate.Outputs.annual_energy_value)
@@ -269,9 +282,7 @@ def calc_system_performance(
     loan.SystemCosts.total_installed_cost = direct_costs + sales_tax + one_time_charge
 
     # ITC for batteries
-    itc_batt_basis = batt_costs  # or narrow to the portion of batt costs you deem eligible
     loan.TaxCreditIncentives.itc_fed_percent = [0.0]      # don't double count via percent
-    loan.TaxCreditIncentives.itc_fed_amount  = [0.30 * itc_batt_basis]
 
     loan.execute()
     return -loan.Outputs.npv
@@ -279,11 +290,43 @@ def calc_system_performance(
 
 def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch_table=None):
     """
-    Compute optimal system size (with/without battery) and attach outputs to agent row.
+    Size PV once (PV-only), then bolt on a battery at a fixed ratio, and record **both**
+    PV-only and PV+Battery results on the agent row.
 
-    Produces per-customer kW arrays for aggregation (this year only):
-      - baseline_net_hourly: pre-system load (for non-adopters this year)
-      - adopter_*_hourly: components and net for this year's new adopters
+    Purpose
+    -------
+    - Optimize PV capacity (kW_dc) **without** a battery to get the economically optimal PV size.
+    - With PV fixed at that optimum, run a **single** forward simulation with a battery sized
+      as a fixed ratio to PV (no PV re-optimization).
+    - Store *both* sets of hourly arrays and scalars:
+        * PV-only: adopter_net_hourly_pvonly, first_year_elec_bill_with_system_pvonly, etc.
+        * PV+Batt: adopter_net_hourly_with_batt, first_year_elec_bill_with_system_with_batt, batt kw/kWh, etc.
+      For backward compatibility, adopter_net_hourly and first_year_elec_bill_with_system are set to PV-only.
+
+    Inputs
+    ------
+    con : DB-API connection
+        Read-only connection used by agent_mutation (load/resource).
+    agent : pd.Series
+        Agent row with tariff, incentives, costs, and runtime fields (mutated copy returned).
+    sectors : Any
+        Unused here (kept for signature compatibility).
+    rate_switch_table : pd.DataFrame or None
+        Table used by agent_mutation.elec.apply_rate_switch.
+
+    Returns
+    -------
+    agent : pd.Series
+        The input row with additional fields populated:
+        - 'baseline_net_hourly' (list[float])
+        - 'adopter_net_hourly_pvonly', 'adopter_net_hourly_with_batt' (list[float])
+        - 'adopter_net_hourly' (PV-only, for backward compatibility)
+        - 'adopter_load_hourly', 'adopter_pv_hourly' (PV-only components)
+        - PV-only scalars: 'system_kw', 'annual_energy_production_kwh', 'naep', 'capacity_factor',
+                           'first_year_elec_bill_with_system' (PV-only), 'cash_flow', 'npv', 'payback_period'
+        - Battery scalars at fixed ratio: 'batt_kw', 'batt_kwh',
+          and with-battery economics: 'first_year_elec_bill_with_system_with_batt'
+        - 'pv_per_kw_hourly' (per-kW PV profile used for NAEP and scaling)
     """
     cur = con.cursor()
 
@@ -291,14 +334,18 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     if 'agent_id' not in agent.index:
         agent.loc['agent_id'] = agent.name
 
-    # 1) Hourly load profile (pre-sizing)
+    # -----------------------------
+    # 1) Load profile (hourly, kW)
+    # -----------------------------
     t0 = time.time()
     lp = agent_mutation.elec.get_and_apply_agent_load_profiles(con, agent)
     cons = np.asarray(lp['consumption_hourly'].iloc[0], dtype=float)
     del lp
     load_profiles_total_time = time.time() - t0
 
-    # 2) Solar resource (per-kW). Keep NAEP for sizing; do not store generation_hourly.
+    # ----------------------------------------------------
+    # 2) Solar resource per kW_dc (PV generation per kW)
+    # ----------------------------------------------------
     t0 = time.time()
     norm = agent_mutation.elec.get_and_apply_normalized_hourly_resource_solar(con, agent)
     gen_per_kw = np.asarray(norm['solar_cf_profile'].iloc[0], dtype=float) / 1e6
@@ -308,41 +355,39 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
 
     pv = {'consumption_hourly': cons, 'generation_hourly': gen_per_kw}
 
-    # 3) PySAM setup
-    t_setup = time.time()
+    # --------------------------
+    # 3) PySAM object scaffolds
+    # --------------------------
     driver_mod, batt, utilityrate, loan, market_flag = _init_pv_batt_stack(agent.loc['sector_abbr'])
-
     loan.FinancialParameters.market = market_flag
 
+    # Lifetime/fin params
     utilityrate.Lifetime.inflation_rate = agent.loc['inflation_rate'] * 100
     utilityrate.Lifetime.analysis_period = agent.loc['economic_lifetime_yrs']
     utilityrate.Lifetime.system_use_lifetime_output = 0
     utilityrate.SystemOutput.degradation = [agent.loc['pv_degradation_factor'] * 100]
     utilityrate.ElectricityRates.rate_escalation = [agent.loc['elec_price_escalator'] * 100]
 
-    # Let process_tariff set metering option from tariff_dict; set supporting fields here.
-    net_sell = 0
-    utilityrate.ElectricityRates.ur_nm_yearend_sell_rate = net_sell
-    utilityrate.ElectricityRates.ur_sell_eq_buy = 0
-    utilityrate.ElectricityRates.TOU_demand_single_peak = 0
-    utilityrate.ElectricityRates.en_electricity_rates = 1
+    # Initial tariff (pre-switch)
+    is_ca = str(agent.get('state_abbr', '')).upper() == 'CA'
+    ts_sell = None if is_ca else (np.asarray(agent.loc['wholesale_prices'], dtype=float).ravel()
+                                  * agent.loc['elec_price_multiplier'])
+    tariff_dict = normalize_tariff(agent.loc['tariff_dict'], net_sell_rate_scalar=0.0)
+    # California NEM3 adjustment
+    if is_ca and tariff_dict.get('ur_ec_tou_mat'):
+        _tou = np.asarray(tariff_dict['ur_ec_tou_mat'], dtype=float)
+        if _tou.ndim == 2 and _tou.shape[1] >= 6:
+            _tou[:, 5] = _tou[:, 4] * 0.25
+            tariff_dict['ur_ec_tou_mat'] = _tou.tolist()
+    if is_ca: tariff_dict['ur_metering_option'] = 2
+    utilityrate = process_tariff(utilityrate, tariff_dict, 0.0, ts_sell_rate=ts_sell)
 
-    # Initial tariff load (pre-switch); rebuild again inside calc_system_performance after a switch.
-    ts_sell = np.asarray(agent.loc['wholesale_prices'], dtype=float).ravel() * agent.loc['elec_price_multiplier']
-    tariff_dict = normalize_tariff(agent.loc['tariff_dict'], net_sell_rate_scalar=net_sell)
-    utilityrate = process_tariff(utilityrate, tariff_dict, net_sell, ts_sell_rate=ts_sell)
-
-    # Loan parameters
+    # Loan params
     loan.FinancialParameters.analysis_period = agent.loc['economic_lifetime_yrs']
     loan.FinancialParameters.debt_fraction = 100 - (agent.loc['down_payment_fraction'] * 100)
     loan.FinancialParameters.federal_tax_rate = [(agent.loc['tax_rate'] * 100) * 0.7]
     loan.FinancialParameters.inflation_rate = agent.loc['inflation_rate'] * 100
-    loan.FinancialParameters.insurance_rate = 0
-    loan.FinancialParameters.loan_rate = agent.loc['loan_interest_rate'] * 100
     loan.FinancialParameters.loan_term = agent.loc['loan_term_yrs']
-    loan.FinancialParameters.mortgage = 0
-    loan.FinancialParameters.prop_tax_assessed_decline = 5
-    loan.FinancialParameters.prop_tax_cost_assessed_percent = 95
     loan.FinancialParameters.property_tax_rate = 0
     loan.FinancialParameters.real_discount_rate = agent.loc['real_discount_rate'] * 100
     loan.FinancialParameters.salvage_percentage = 0
@@ -358,7 +403,6 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
         'batt_capex_per_kwh':                  agent.loc['batt_capex_per_kwh'],
         'batt_om_per_kw':                      agent.loc['batt_om_per_kw'],
         'batt_om_per_kwh':                     agent.loc['batt_om_per_kwh'],
-        'linear_constant':                     agent.loc['linear_constant'],
         'system_capex_per_kw_combined':        agent.loc['system_capex_per_kw_combined'],
         'system_om_per_kw_combined':           agent.loc['system_om_per_kw'],
         'system_variable_om_per_kw_combined':  agent.loc['system_variable_om_per_kw'],
@@ -366,33 +410,21 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
         'batt_capex_per_kwh_combined':         agent.loc['batt_capex_per_kwh_combined'],
         'batt_om_per_kw_combined':             agent.loc['batt_om_per_kw_combined'],
         'batt_om_per_kwh_combined':            agent.loc['batt_om_per_kwh_combined'],
-        'linear_constant_combined':            agent.loc['linear_constant_combined']
+        'linear_constant_combined':            agent.loc['linear_constant_combined'],
     }
 
+    # Depreciation switches
     if agent.loc['sector_abbr'] == 'res':
         loan.Depreciation.depr_fed_type = 0
         loan.Depreciation.depr_sta_type = 0
     else:
-        loan.Depreciation.depr_fed_type = 1
-        loan.Depreciation.depr_sta_type = 0
+        loan.Depreciation.depr_fed_type = 2
+        loan.Depreciation.depr_sta_type = 2
 
-    loan.TaxCreditIncentives.itc_fed_percent             = [agent.loc['itc_fraction_of_capex'] * 100]
-    loan.BatterySystem.batt_replacement_option           = 2
-    loan.BatterySystem.batt_replacement_schedule_percent = [0] * (agent.loc['batt_lifetime_yrs'] - 1) + [1]
-    loan.SystemOutput.degradation                        = [agent.loc['pv_degradation_factor'] * 100]
-    loan.Lifetime.system_use_lifetime_output             = 0
+    # Battery dispatch selection
+    batt_disp = 0 # for peak shaving
 
-    pysam_setup_time = time.time() - t_setup
-
-    # 4) Optimize scalar kW with/without battery
-    t_opt = time.time()
-    max_load   = agent.loc['load_kwh_per_customer_in_bin'] / agent.loc['naep']
-    max_system = max_load
-    tol        = min(0.25 * max_system, 0.25)
-    batt_disp  = 'peak_shaving' if agent.loc['sector_abbr'] != 'res' else 'price_signal_forecast'
-    low        = max_system * 0.8
-    high       = max_system * 1.25
-
+    # Objective handles (shared)
     def perf_with_batt(x):
         return calc_system_performance(
             x, pv, utilityrate, loan, batt, sc, agent, rate_switch_table, True, batt_disp
@@ -403,13 +435,43 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
             x, pv, utilityrate, loan, batt, sc, agent, rate_switch_table, False, 0
         )
 
-    # --- Run with battery, capture arrays ---
-    res_w = optimize.minimize_scalar(
-        perf_with_batt,
-        bounds=(low, high),
-        method='bounded',
-        options={'xatol': max(2, tol)}
-    )
+    # ==========================================
+    # 4) Optimize PV-only to get kW*
+    # ==========================================
+    max_load   = agent.loc['load_kwh_per_customer_in_bin'] / agent.loc['naep']
+    max_system = max_load    
+    low        = max_system * 0.8
+    high       = max_system * 1.25
+    tol = max(2, int(max(1, high - low) * 1e-3))
+    res_n = optimize.minimize_scalar(
+        perf_no_batt, bounds=(low, high), method='bounded', options={'xatol': tol}
+    )   
+
+    # --- PV-only outputs at kW* (objective call already set state) ---
+    out_n_loan = loan.Outputs.export()
+    out_n_util = utilityrate.Outputs.export()
+    gen_n_annual = float(np.nansum(np.asarray(getattr(utilityrate.SystemOutput, "gen", []), dtype=float)))
+    kw_star = float(res_n.x)
+
+    load_n_ts = np.asarray(getattr(utilityrate.Load, "load", []), dtype=float)
+    _pv_n_raw = getattr(utilityrate.Outputs, "year1_hourly_system_to_load", None)  # PV→load in PV-only
+    if _pv_n_raw is None or (hasattr(_pv_n_raw, "__len__") and len(_pv_n_raw) == 0):
+        _pv_n_raw = getattr(utilityrate.SystemOutput, "gen", [])
+    pv_n_ts  = np.asarray(_pv_n_raw, dtype=float)
+
+    # *** Net import from grid (PV-only) — authoritative ***
+    e_fromgrid_n = np.asarray(getattr(utilityrate.Outputs, "year1_hourly_e_fromgrid", []), dtype=float)
+
+    first_with_n    = out_n_util.get('utility_bill_w_sys_year1', 0.0)
+    first_without_n = out_n_util.get('utility_bill_wo_sys_year1', 0.0)
+    npv_n           = out_n_loan.get("npv", float("-inf"))
+    cash_flow_n     = list(out_n_loan.get('cf_payback_with_expenses', []))
+    payback_n       = out_n_loan.get('payback', None)
+
+    # ==========================================
+    # 5) Single forward run with battery at kW*
+    # ==========================================
+    _ = perf_with_batt(kw_star)
     out_w_loan = loan.Outputs.export()
     out_w_util = utilityrate.Outputs.export()
     gen_w_annual = float(np.nansum(np.asarray(getattr(utilityrate.SystemOutput, "gen", []), dtype=float)))
@@ -417,39 +479,23 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     kwh_w        = getattr(batt.Outputs, "batt_bank_installed_capacity", 0.0)
 
     load_w_ts = np.asarray(getattr(utilityrate.Load, "load", []), dtype=float)
-    # Prefer PV->load; fallback to PV generation; clip to load to avoid negatives
-    _pv_w_raw = getattr(utilityrate.Outputs, "year1_hourly_system_to_load", None)
-    if _pv_w_raw is None or (hasattr(_pv_w_raw, "__len__") and len(_pv_w_raw) == 0):
-        _pv_w_raw = getattr(utilityrate.SystemOutput, "gen", [])
-    pv_w_ts  = np.asarray(_pv_w_raw, dtype=float)
-    btl_w_ts = np.asarray(getattr(batt.Outputs, "batt_to_load", []), dtype=float)
-    gtb_w_ts = np.asarray(getattr(batt.Outputs, "grid_to_batt", []), dtype=float)
-    npv_w    = out_w_loan.get("npv", float("-inf"))
+    _sys_w_raw = getattr(batt.Outputs, "system_to_load", None)  # PV+Batt → load
+    if _sys_w_raw is None or (hasattr(_sys_w_raw, "__len__") and len(_sys_w_raw) == 0):
+        _sys_w_raw = getattr(utilityrate.SystemOutput, "gen", [])
+    sys_to_load_w  = np.asarray(_sys_w_raw, dtype=float)
 
-    # --- Run without battery, capture arrays ---
-    res_n = optimize.minimize_scalar(
-        perf_no_batt,
-        bounds=(low, high),
-        method='bounded',
-        options={'xatol': max(2, tol)}
-    )
-    out_n_loan   = loan.Outputs.export()
-    out_n_util   = utilityrate.Outputs.export()
-    gen_n_annual = float(np.nansum(np.asarray(getattr(utilityrate.SystemOutput, "gen", []), dtype=float)))
+    # *** Net import from grid (PV+Batt) — authoritative ***
+    e_fromgrid_w = np.asarray(getattr(batt.Outputs, "grid_to_load", []), dtype=float)
 
-    load_n_ts = np.asarray(getattr(utilityrate.Load, "load", []), dtype=float)
-    _pv_n_raw = getattr(utilityrate.Outputs, "year1_hourly_system_to_load", None)
-    if _pv_n_raw is None or (hasattr(_pv_n_raw, "__len__") and len(_pv_n_raw) == 0):
-        _pv_n_raw = getattr(utilityrate.SystemOutput, "gen", [])
-    pv_n_ts  = np.asarray(_pv_n_raw, dtype=float)
-    npv_n    = out_n_loan.get("npv", float("-inf"))
+    first_with_w    = out_w_util.get('utility_bill_w_sys_year1', 0.0)
+    first_without_w = out_w_util.get('utility_bill_wo_sys_year1', 0.0)
 
-    optimize_time = time.time() - t_opt
-
-    # --- Choose winning case and set scalars + arrays consistently ---
+    # -----------------------------
+    # 6) Align arrays and set fields
+    # -----------------------------
     def _align_to_n(*arrays):
-        sizes = [a.size for a in arrays if isinstance(a, np.ndarray)]
-        n = max(sizes) if sizes else 0
+        sizes = [np.asarray(a, dtype=float).size for a in arrays]
+        n = max([s for s in sizes if s is not None] or [0])
         out = []
         for a in arrays:
             a = np.asarray(a, dtype=float).ravel()
@@ -461,87 +507,59 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
                 out.append(a[:n])
         return out
 
-    if npv_w >= npv_n:
-        # with battery wins
-        system_kw     = float(res_w.x)
-        annual_kwh    = gen_w_annual
-        first_with    = out_w_util.get('utility_bill_w_sys_year1', 0.0)
-        first_without = out_w_util.get('utility_bill_wo_sys_year1', 0.0)
-        npv_final     = npv_w
-        cash_flow     = list(out_w_loan.get('cf_payback_with_expenses', []))
-        payback       = out_w_loan.get('payback', None)
-        batt_kw       = kw_w
-        batt_kwh      = kwh_w
-        cbi           = out_w_loan.get('cbi_total', 0.0)
-        ibi           = out_w_loan.get('ibi_total', 0.0)
-        pbi           = out_w_loan.get('cf_pbi_total', 0.0)
+    # Baseline (non-adopters): just the original load
+    load_ts = np.asarray(cons, dtype=float)
+    agent.loc['baseline_net_hourly'] = load_ts.tolist()
 
-        load_ts, pv_ts = _align_to_n(load_w_ts, pv_w_ts)
-    else:
-        # no battery wins
-        system_kw     = float(res_n.x)
-        annual_kwh    = gen_n_annual
-        first_with    = out_n_util.get('utility_bill_w_sys_year1', 0.0)
-        first_without = out_n_util.get('utility_bill_wo_sys_year1', 0.0)
-        npv_final     = npv_n
-        cash_flow     = list(out_n_loan.get('cf_payback_with_expenses', []))
-        payback       = out_n_loan.get('payback', None)
-        batt_kw       = 0.0
-        batt_kwh      = 0.0
-        cbi           = out_n_loan.get('cbi_total', 0.0)
-        ibi           = out_n_loan.get('ibi_total', 0.0)
-        pbi           = out_n_loan.get('cf_pbi_total', 0.0)
+    # PV-only arrays
+    load_n_ts, pv_n_ts, e_fromgrid_n = _align_to_n(load_n_ts, pv_n_ts, e_fromgrid_n)
+    adopter_load_ts = load_n_ts
+    adopter_pv_ts   = pv_n_ts  # in PV-only run this is PV→load
+    adopter_net_pvo = e_fromgrid_n  # authoritative net import
 
-        load_ts, pv_ts = _align_to_n(load_n_ts, pv_n_ts)
+    # With-battery arrays (net from grid)
+    load_w_ts, sys_to_load_w, e_fromgrid_w = _align_to_n(load_w_ts, sys_to_load_w, e_fromgrid_w)
+    adopter_net_wb  = e_fromgrid_w  # already includes PV + battery to load
 
-    # Guard against div/0 in savings % below
-    if not first_without or first_without == 0:
-        first_without = 1.0
+    # Store arrays
+    agent.loc['adopter_load_hourly']            = adopter_load_ts.tolist()
+    agent.loc['adopter_pv_hourly']              = adopter_pv_ts.tolist()
+    agent.loc['adopter_net_hourly_pvonly']      = adopter_net_pvo.tolist()
+    agent.loc['adopter_net_hourly_with_batt']   = adopter_net_wb.tolist()
+    # Back-compat (PV-only)
+    agent.loc['adopter_net_hourly']             = adopter_net_pvo.tolist()
 
-    # --- Build arrays for aggregation (per-customer kW) ---
-    # Baseline (pre-system) net = load (fallback to load_ts if 'cons' missing)
-    try:
-        _cons_arr = np.asarray(cons, dtype=float)
-    except Exception:
-        _cons_arr = load_ts
-    agent.loc['baseline_net_hourly'] = _cons_arr[:load_ts.size].tolist()
+    # PV-only scalars
+    system_kw     = kw_star
+    annual_kwh    = gen_n_annual
+    naep_final    = annual_kwh / max(system_kw, 1e-9)
+    first_with    = first_with_n
+    first_without = first_without_n
+    savings       = first_without - first_with
+    savings_frac  = savings / first_without if first_without != 0 else 0.0
+    avg_price     = first_without / agent.loc['load_kwh_per_customer_in_bin']
 
-    # Adopter components and net for this year (clip to avoid negative net / exports)
-    adopter_load_ts = load_ts
-    adopter_pv_ts   = pv_ts
-    adopter_net_ts  = np.maximum(adopter_load_ts - adopter_pv_ts, 0.0)
+    agent.loc['system_kw']                        = system_kw
+    agent.loc['annual_energy_production_kwh']     = annual_kwh
+    agent.loc['naep']                             = naep_final
+    agent.loc['capacity_factor']                  = naep_final / 8760.0
+    agent.loc['first_year_elec_bill_with_system'] = first_with  # PV-only (back-compat)
+    agent.loc['first_year_elec_bill_wo_system']   = first_without
+    agent.loc['first_year_elec_bill_savings']     = savings
+    agent.loc['first_year_elec_bill_savings_frac']= savings_frac
+    agent.loc['price_per_kwh']                    = avg_price
+    agent.loc['npv']                              = npv_n
+    agent.loc['payback_period']                   = float(np.round(payback_n if np.isfinite(payback_n) else 30.1, 1))
+    agent.loc['cash_flow']                        = cash_flow_n
 
-    agent.loc['adopter_load_hourly'] = adopter_load_ts.tolist()
-    agent.loc['adopter_pv_hourly']   = adopter_pv_ts.tolist()
-    agent.loc['adopter_net_hourly']  = adopter_net_ts.tolist()
+    # With-battery scalars (at fixed ratio)
+    agent.loc['batt_kw']                                        = float(kw_w)
+    agent.loc['batt_kwh']                                       = float(kwh_w)
+    agent.loc['first_year_elec_bill_with_system_with_batt']     = first_with_w
+    agent.loc['first_year_elec_bill_wo_system_with_batt']       = first_without_w
+    agent.loc['first_year_elec_bill_savings_with_batt']         = first_without_w - first_with_w
 
-
-    # Scalars as before
-    naep_final   = annual_kwh / max(system_kw, 1e-9)
-    savings      = first_without - first_with
-    savings_frac = savings / first_without
-    avg_price    = first_without / agent.loc['load_kwh_per_customer_in_bin']
-
-    agent.loc['system_kw']                           = system_kw
-    agent.loc['batt_kw']                             = batt_kw
-    agent.loc['batt_kwh']                            = batt_kwh
-    agent.loc['npv']                                 = npv_final
-    agent.loc['payback_period']                      = float(np.round(payback if np.isfinite(payback) else 30.1, 1))
-    agent.loc['cash_flow']                           = cash_flow
-    agent.loc['annual_energy_production_kwh']        = annual_kwh
-    agent.loc['naep']                                = naep_final
-    agent.loc['capacity_factor']                     = naep_final / 8760.0
-    agent.loc['first_year_elec_bill_with_system']    = first_with
-    agent.loc['first_year_elec_bill_savings']        = savings
-    agent.loc['first_year_elec_bill_savings_frac']   = savings_frac
-    agent.loc['max_system_kw']                       = max_system
-    agent.loc['first_year_elec_bill_without_system'] = first_without
-    agent.loc['avg_elec_price_cents_per_kwh']        = avg_price
-    agent.loc['cbi']                                 = cbi
-    agent.loc['ibi']                                 = ibi
-    agent.loc['pbi']                                 = pbi
-    agent.loc['cash_incentives']                     = ''
-    agent.loc['export_tariff_results']               = ''
+    # Keep per-kW PV profile for downstream use/debug
     agent.loc['pv_per_kw_hourly'] = gen_per_kw.tolist()
 
     cur.close()
@@ -948,7 +966,7 @@ def normalize_tariff(raw, net_sell_rate_scalar=0.0, debug=False):
 
     # Force Net Billing if configured, else honor input (0=NM, 1=Net Billing, 2=BA/SA)
     mo_in = int(td.get('ur_metering_option', 0))
-    out['ur_metering_option'] = 1 if FORCE_NET_BILLING else mo_in
+    out['ur_metering_option'] = 2 if FORCE_NET_BILLING else mo_in
 
     # Fixed charge (accept legacy key too)
     fc = td.get('ur_monthly_fixed_charge', td.get('fixed_charge', 0.0))

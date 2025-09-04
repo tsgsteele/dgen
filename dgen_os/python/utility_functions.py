@@ -8,7 +8,7 @@ import colorlog
 import pandas as pd
 import datetime
 import select
-import pg8000.native
+import pg8000
 import psycopg2 as pg
 from psycopg2.extras import RealDictCursor
 import time
@@ -149,52 +149,99 @@ _connector = Connector()
 def make_con(connection_string, role, async_=False):
     """
     Returns a DB connection+cursor.
-      - In GCP (PG_CONN_STRING set): use Connector + pg8000
-      - Locally: psycopg2.connect(connection_string)
+
+    Priority:
+      1) If USE_PRIVATE_IP_DIRECT=1 or DB_PRIVATE_IP is set: direct Private IP with pg8000 DB-API (no connector).
+      2) Else if PG_CONN_STRING is set: legacy connector + pg8000 path (unchanged).
+      3) Else: local psycopg2.connect(connection_string).
     """
+
+    # --- Preferred: direct Private IP (no Admin API calls) ---
+    if os.environ.get("USE_PRIVATE_IP_DIRECT") == "1" or os.environ.get("DB_PRIVATE_IP"):
+        # Fail-closed: remove connector/proxy envs so nothing can auto-fallback
+        for k in ("INSTANCE_CONNECTION_NAME", "PG_CONN_STRING",
+                  "CLOUD_SQL_CONNECTION_NAME", "DB_SOCKET_DIR"):
+            os.environ.pop(k, None)
+
+        host = os.environ["DB_PRIVATE_IP"]                  # e.g., 10.80.160.3
+        user = os.environ["DB_USER"]
+        password = os.environ["DB_PASS"]
+        dbname = os.environ.get("DB_NAME", "postgres")
+
+        # Use pg8000 DB-API connection (has .cursor())
+        conn = pg8000.connect(
+            user=user,
+            password=password,
+            host=host,
+            port=5432,
+            database=dbname,
+            application_name="dgen_worker",
+        )
+        cur = conn.cursor()
+        cur.execute(f'SET ROLE "{role}";')
+        conn.commit()
+        return conn, cur
+
+    # --- Legacy cloud mode: Connector + pg8000 (kept for compatibility) ---
     dsn = os.environ.get("PG_CONN_STRING")
     if dsn:
-        # ── Cloud mode: Connector + pg8000
+        if _connector is None:
+            raise RuntimeError("Cloud SQL Connector not available but PG_CONN_STRING is set")
         inst     = os.environ["INSTANCE_CONNECTION_NAME"]
         user     = os.environ["DB_USER"]
         password = os.environ["DB_PASS"]
         dbname   = os.environ.get("DB_NAME", None)
 
-        conn: pg8000.native.Connection = _connector.connect(
+        conn = _connector.connect(
             inst,
-            "pg8000",
+            "pg8000",                      # returns a DB-API connection
             user=user,
             password=password,
             db=dbname,
-            ip_type=IPTypes.PRIVATE
+            ip_type=IPTypes.PRIVATE if IPTypes else None,
         )
         cur = conn.cursor()
-        # SET ROLE still works
         cur.execute(f'SET ROLE "{role}";')
         conn.commit()
+        return conn, cur
 
+    # --- Local mode: psycopg2 + cloud-sql-proxy or local Postgres ---
+    conn = pg.connect(connection_string, async_=async_)
+    if async_:
+        wait(conn)
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute(f'SET ROLE "{role}";')
+    if async_:
+        wait(conn)
     else:
-        # ── Local mode: psycopg2 + cloud-sql-proxy or local Postgres
-        conn = pg.connect(connection_string, async_=async_)
-        if async_:
-            wait(conn)
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute(f'SET ROLE "{role}";')
-        if async_:
-            wait(conn)
-        else:
-            conn.commit()
-
+        conn.commit()
     return conn, cur
 
 def make_engine(pg_engine_con):
     """
-    SQLAlchemy engine factory:
-     - GCP: use Connector+pg8000 via creator() to open the Cloud SQL socket
-     - Local: create_engine(pg_engine_con) as before
+    If USE_PRIVATE_IP_DIRECT=1, build a direct pg8000 URL to the instance's PRIVATE IP
+    using DB_* env vars. Otherwise, use the existing Cloud SQL Connector path.
+    Local mode remains unchanged.
     """
+    # --- Fast path: force direct Private IP without touching call sites ---
+    if os.environ.get("USE_PRIVATE_IP_DIRECT") == "1":
+        user = os.environ["DB_USER"]
+        pw   = os.environ["DB_PASS"]
+        db   = os.environ.get("DB_NAME", "postgres")
+        host = os.environ["DB_PRIVATE_IP"]  # e.g., 10.80.160.3
+        url  = f"postgresql+pg8000://{user}:{pw}@{host}:5432/{db}"
+        print(f"[make_engine] Direct Private IP (pg8000) URL: {url}", flush=True)
+        return create_engine(
+            url,
+            pool_size=2,          # one connection per worker
+            max_overflow=0,       # don't create extras
+            pool_pre_ping=True,
+            pool_recycle=300,
+            connect_args={"application_name": "dgen_worker"}
+        )
+
+    # --- Existing Cloud mode: Connector (unchanged behavior) ---
     if os.environ.get("PG_CONN_STRING"):
-        # Cloud mode: all engine connections go via the Connector
         def getconn():
             inst     = os.environ["INSTANCE_CONNECTION_NAME"]
             user     = os.environ["DB_USER"]
@@ -208,18 +255,24 @@ def make_engine(pg_engine_con):
                 db=dbname,
                 ip_type=IPTypes.PRIVATE
             )
-
         print(f"[make_engine] Using Cloud SQL Connector for engine", flush=True)
+        # keep pooling tiny + stable to reduce new connects even if connector path is used
         return create_engine(
             "postgresql+pg8000://",
             creator=getconn,
-            poolclass=NullPool
+            pool_size=2,
+            max_overflow=0,
+            pool_pre_ping=True,
+            pool_recycle=300
         )
 
-    # Local mode
-    url = pg_engine_con.strip()
+    # --- Local mode (unchanged) ---
+    url = (pg_engine_con or "").strip()
     print(f"[make_engine] Using URL: {url}", flush=True)
-    return create_engine(url, poolclass=NullPool)
+    return create_engine(
+        url,
+        pool_size=5, max_overflow=0, pool_pre_ping=True, pool_recycle=300
+    )
 
 
 def get_pg_params(json_file):

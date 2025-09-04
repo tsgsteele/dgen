@@ -28,11 +28,19 @@ import logging
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
 
+# Load attachment rate functions
+from attachment_rate_functions import (
+    _load_state_attachment_rates,
+    _allocate_battery_adopters_integer,
+    export_state_hourly_with_storage_mix
+)
+
 # raise numpy and pandas warnings as exceptions
 pd.set_option('mode.chained_assignment', None)
 # Suppress pandas warnings
 import warnings
 warnings.simplefilter("ignore")
+
 
 def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
     model_settings = settings.init_model_settings()
@@ -83,14 +91,14 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                 scenario_settings, con, cur, engine, model_settings,
                 agent_file_status, input_name='agent_file'
             )
-            # Subset to only single family and no renters
-            # solar_agents.df = (
-            #     solar_agents.df[
-            #         (solar_agents.df['owner_occupancy_status'] == 1) &
-            #         (solar_agents.df['crb_model'] != "Multi-Family with 5+ Units")
+            #Subset to only single family and no renters
+            solar_agents.df = (
+                solar_agents.df[
+                    (solar_agents.df['owner_occupancy_status'] == 1) &
+                    (solar_agents.df['crb_model'] != "Multi-Family with 5+ Units")
 
-            #     ]
-            # )
+                ]
+            )
             cols_base = list(solar_agents.df.columns)
 
         if scenario_settings.techs == ['solar']:
@@ -103,7 +111,7 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
             nem_selected_scenario = datfunc.get_selected_scenario(con, schema)
             rate_switch_table = agent_mutation.elec.get_rate_switch_table(con)
 
-            if os.environ.get('PG_CONN_STRING'):
+            if os.environ.get('USE_PRIVATE_IP_DIRECT'):
                 deprec_sch = pd.read_sql_table(
                     "deprec_sch_FY19",
                     con=engine,
@@ -221,6 +229,9 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                                                     input_name='batt_tech_performance', csv_import_function=iFuncs.stacked_sectors)
                 value_of_resiliency = iFuncs.import_table(scenario_settings, con, engine, owner,
                                                         input_name='value_of_resiliency', csv_import_function=None)
+            
+            # Load the quarterly attachment rates and compute a state-level weighted average
+            _state_rates = _load_state_attachment_rates("../input_data/ohm_attachment_rates.csv")
 
             # per-year loop
             for year in scenario_settings.model_years:
@@ -384,46 +395,36 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                     solar_agents.df, is_first_year, bass_params, year
                 )
 
-                # Exporting state-level net hourly load
-                if {"baseline_net_hourly", "adopter_net_hourly"}.issubset(solar_agents.df.columns):
-                    # Find a consistent hour length across rows
-                    def _len_safe(x):
-                        try: return len(x)
-                        except Exception: return 0
-                    n_hours = int(min(
-                        solar_agents.df["baseline_net_hourly"].map(_len_safe).replace(0, np.nan).min(),
-                        solar_agents.df["adopter_net_hourly"].map(_len_safe).replace(0, np.nan).min()
-                    ))
-                    if np.isfinite(n_hours) and n_hours > 0:
-                        def _arr(a):
-                            a = np.asarray(a, dtype=float)
-                            if a.size >= n_hours: return a[:n_hours]
-                            return np.pad(a, (0, n_hours - a.size))
-                        net_sum_kw = np.zeros(n_hours, dtype=float)
-                        for _, r in solar_agents.df.iterrows():
-                            base = _arr(r["baseline_net_hourly"])
-                            adop = _arr(r["adopter_net_hourly"])
-                            n_cust  = float(r.get("customers_in_bin", 0.0))
-                            # IMPORTANT: use *cumulative* adopters after diffusion for this year
-                            n_adopt = float(r.get("number_of_adopters", 0.0))
-                            n_non   = max(n_cust - n_adopt, 0.0)
-                            net_sum_kw += adop * n_adopt + base * n_non
+                # ensure agent_id is a real column before merge (only if the index is already agent_id)
+                if solar_agents.df.index.name == 'agent_id' and 'agent_id' not in solar_agents.df.columns:
+                    solar_agents.df = solar_agents.df.reset_index()  # creates 'agent_id' column from the index
 
-                        # Convert to MW and persist one array per state-year
-                        state_abbr = solar_agents.df["state_abbr"].iloc[0]
-                        rec = pd.DataFrame([{
-                            "state_abbr": state_abbr,
-                            "year": year,
-                            "n_hours": int(n_hours),
-                            "net_sum": (net_sum_kw / 1000.0).tolist(),  # MW
-                        }])
-                        iFuncs.df_to_psql(
-                            rec, engine, schema, owner, "state_hourly_agg",
-                            if_exists="append", append_transformations=False
-                        )
+                # 1) Merge onto the agent frame by state; fill missing with 0
+                solar_agents.df = solar_agents.df.merge(_state_rates, on="state_abbr", how="left")
+                solar_agents.df["storage_attachment_rate"] = solar_agents.df["storage_attachment_rate"].fillna(0.0)
 
-                solar_agents.on_frame(agent_mutation.elec.estimate_total_generation)
+                # restore agent_id as index without dropping the column (idempotent)
+                if 'agent_id' in solar_agents.df.columns and solar_agents.df.index.name != 'agent_id':
+                    solar_agents.df = solar_agents.df.set_index('agent_id', drop=False)
 
+                # 2) Allocate **integer** battery adopters for THIS year and compute new/cum batt capacity
+                solar_agents.df = _allocate_battery_adopters_integer(solar_agents.df, year)
+
+                # 2a) Swap in cumulative battery capacity from the battery adoption allocation
+                # --- simplest per-agent update of battery cumulatives for next year's handoff ---
+                ml  = market_last_year_df.set_index("agent_id")
+                batt_cums = solar_agents.df.set_index("agent_id")[["batt_kw_cum", "batt_kwh_cum"]]
+
+                # write the updated cumulatives into the "last_year" fields (by agent_id)
+                ml.loc[batt_cums.index, "batt_kw_cum_last_year"]  = batt_cums["batt_kw_cum"].to_numpy()
+                ml.loc[batt_cums.index, "batt_kwh_cum_last_year"] = batt_cums["batt_kwh_cum"].to_numpy()
+
+                market_last_year_df = ml.reset_index()
+
+                # 3) Export state-level hourly net using the actual cumulative mix (PV-only vs PV+Batt)
+                export_state_hourly_with_storage_mix(engine, schema, owner, year, solar_agents.df)
+
+                # 4) Update cumulatives for next year's state capacity table
                 last_year_installed_capacity = solar_agents.df[['state_abbr','system_kw_cum','batt_kw_cum','batt_kwh_cum','year']].copy()
                 last_year_installed_capacity = last_year_installed_capacity.loc[last_year_installed_capacity['year'] == year]
                 last_year_installed_capacity = last_year_installed_capacity.groupby('state_abbr')[['system_kw_cum','batt_kw_cum','batt_kwh_cum']].sum().reset_index()
@@ -441,7 +442,8 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                     'diffusion_market_share','new_market_value','market_value',
                     'total_gen_twh','tariff_dict','deprec_sch','cash_flow',
                     'cbi','ibi','pbi','cash_incentives','state_incentives',
-                    'export_tariff_results'
+                    'export_tariff_results', 'baseline_net_hourly', 'adopter_net_hourly_pvonly',
+                    'adopter_net_hourly_with_batt', 'adopter_net_hourly', 'wholesale_prices'
                 ] if f in solar_agents.df.columns]
                 df_write = solar_agents.df.drop(drop_list, axis=1)
                 df_write.to_pickle(os.path.join(out_scen_path, f'agent_df_{year}.pkl'))
