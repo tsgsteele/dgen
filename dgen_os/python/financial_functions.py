@@ -281,8 +281,8 @@ def calc_system_performance(
     sales_tax = 0.0
     loan.SystemCosts.total_installed_cost = direct_costs + sales_tax + one_time_charge
 
-    # ITC for batteries
-    loan.TaxCreditIncentives.itc_fed_percent = [0.0]      # don't double count via percent
+    # ITC
+    loan.TaxCreditIncentives.itc_fed_percent = [agent.loc['itc_fraction_of_capex']]
 
     loan.execute()
     return -loan.Outputs.npv
