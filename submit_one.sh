@@ -6,7 +6,7 @@ JOB_TS=$(date -u +"%Y%m%d-%H%M%S")
 
 
 # Define job name with timestamp
-JOB_NAME="dgen-mid-large-states-${JOB_TS}"
+JOB_NAME="dgen-virginia-${JOB_TS}"
 
 # submit the third job
 gcloud batch jobs submit "${JOB_NAME}" \
