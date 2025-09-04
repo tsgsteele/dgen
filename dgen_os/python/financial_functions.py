@@ -441,7 +441,7 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     max_load   = agent.loc['load_kwh_per_customer_in_bin'] / agent.loc['naep']
     max_system = max_load    
     low        = max_system * 0.8
-    high       = max_system * 1.25
+    high       = max_system * 1
     tol = max(2, int(max(1, high - low) * 1e-3))
     res_n = optimize.minimize_scalar(
         perf_no_batt, bounds=(low, high), method='bounded', options={'xatol': tol}
