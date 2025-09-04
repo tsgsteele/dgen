@@ -269,15 +269,6 @@ def calc_system_performance(
     utilityrate.Load.load = load_hourly
     utilityrate.execute()
 
-    # ---- Financials ----
-    # loan = process_incentives(
-    #     loan,
-    #     kw,
-    #     batt.BatterySystem.batt_power_discharge_max_kwdc,
-    #     batt.Outputs.batt_bank_installed_capacity,
-    #     gen_hourly,
-    #     agent
-    # )
     loan.FinancialParameters.system_capacity = kw
 
     aev = list(utilityrate.Outputs.annual_energy_value)
