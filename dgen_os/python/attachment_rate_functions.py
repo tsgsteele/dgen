@@ -1,6 +1,7 @@
 ### Helper functions for exogenous application of storage attachment rates
 import numpy as np
 import pandas as pd
+import input_data_functions as iFuncs
 
 
 def _load_state_attachment_rates(csv_path: str = "../input_data/ohm_attachment_rates.csv") -> pd.DataFrame:
