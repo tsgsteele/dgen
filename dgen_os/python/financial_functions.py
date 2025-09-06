@@ -299,8 +299,8 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     - With PV fixed at that optimum, run a **single** forward simulation with a battery sized
       as a fixed ratio to PV (no PV re-optimization).
     - Store *both* sets of hourly arrays and scalars:
-        * PV-only: adopter_net_hourly_pvonly, first_year_elec_bill_with_system_pvonly, etc.
-        * PV+Batt: adopter_net_hourly_with_batt, first_year_elec_bill_with_system_with_batt, batt kw/kWh, etc.
+        * PV-only: adopter_net_hourly_pvonly, etc.
+        * PV+Batt: adopter_net_hourly_with_batt, batt kw/kWh, etc.
       For backward compatibility, adopter_net_hourly and first_year_elec_bill_with_system are set to PV-only.
 
     Inputs
@@ -321,7 +321,6 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
         - 'baseline_net_hourly' (list[float])
         - 'adopter_net_hourly_pvonly', 'adopter_net_hourly_with_batt' (list[float])
         - 'adopter_net_hourly' (PV-only, for backward compatibility)
-        - 'adopter_load_hourly', 'adopter_pv_hourly' (PV-only components)
         - PV-only scalars: 'system_kw', 'annual_energy_production_kwh', 'naep', 'capacity_factor',
                            'first_year_elec_bill_with_system' (PV-only), 'cash_flow', 'npv', 'payback_period'
         - Battery scalars at fixed ratio: 'batt_kw', 'batt_kwh',
@@ -453,6 +452,12 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     gen_n_annual = float(np.nansum(np.asarray(getattr(utilityrate.SystemOutput, "gen", []), dtype=float)))
     kw_star = float(res_n.x)
 
+    # --- Grab arrays of electricity bill savings and utility bills
+    agent.loc['cf_energy_value_pv_only']      = list(out_n_loan.get('cf_energy_value', []))
+    agent.loc['utility_bill_w_sys_pv_only']   = list(out_n_util.get('utility_bill_w_sys', []))
+    agent.loc['utility_bill_wo_sys_pv_only']  = list(out_n_util.get('utility_bill_wo_sys', []))
+
+
     load_n_ts = np.asarray(getattr(utilityrate.Load, "load", []), dtype=float)
     _pv_n_raw = getattr(utilityrate.Outputs, "year1_hourly_system_to_load", None)  # PV→load in PV-only
     if _pv_n_raw is None or (hasattr(_pv_n_raw, "__len__") and len(_pv_n_raw) == 0):
@@ -477,6 +482,12 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     gen_w_annual = float(np.nansum(np.asarray(getattr(utilityrate.SystemOutput, "gen", []), dtype=float)))
     kw_w         = getattr(batt.BatterySystem, "batt_power_discharge_max_kwdc", 0.0)
     kwh_w        = getattr(batt.Outputs, "batt_bank_installed_capacity", 0.0)
+
+    # --- Grab electricity bill savings and utility bills
+    agent.loc['cf_energy_value_pv_batt']      = list(out_w_loan.get('cf_energy_value', []))
+    agent.loc['utility_bill_w_sys_pv_batt']   = list(out_w_util.get('utility_bill_w_sys', []))
+    agent.loc['utility_bill_wo_sys_pv_batt']  = list(out_w_util.get('utility_bill_wo_sys', []))
+
 
     load_w_ts = np.asarray(getattr(utilityrate.Load, "load", []), dtype=float)
     _sys_w_raw = getattr(batt.Outputs, "system_to_load", None)  # PV+Batt → load
@@ -522,8 +533,6 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     adopter_net_wb  = e_fromgrid_w  # already includes PV + battery to load
 
     # Store arrays
-    agent.loc['adopter_load_hourly']            = adopter_load_ts.tolist()
-    agent.loc['adopter_pv_hourly']              = adopter_pv_ts.tolist()
     agent.loc['adopter_net_hourly_pvonly']      = adopter_net_pvo.tolist()
     agent.loc['adopter_net_hourly_with_batt']   = adopter_net_wb.tolist()
     # Back-compat (PV-only)
@@ -543,10 +552,6 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     agent.loc['annual_energy_production_kwh']     = annual_kwh
     agent.loc['naep']                             = naep_final
     agent.loc['capacity_factor']                  = naep_final / 8760.0
-    agent.loc['first_year_elec_bill_with_system'] = first_with  # PV-only (back-compat)
-    agent.loc['first_year_elec_bill_wo_system']   = first_without
-    agent.loc['first_year_elec_bill_savings']     = savings
-    agent.loc['first_year_elec_bill_savings_frac']= savings_frac
     agent.loc['price_per_kwh']                    = avg_price
     agent.loc['npv']                              = npv_n
     agent.loc['payback_period']                   = float(np.round(payback_n if np.isfinite(payback_n) else 30.1, 1))
@@ -555,9 +560,6 @@ def calc_system_size_and_performance(con, agent: pd.Series, sectors, rate_switch
     # With-battery scalars (at fixed ratio)
     agent.loc['batt_kw']                                        = float(kw_w)
     agent.loc['batt_kwh']                                       = float(kwh_w)
-    agent.loc['first_year_elec_bill_with_system_with_batt']     = first_with_w
-    agent.loc['first_year_elec_bill_wo_system_with_batt']       = first_without_w
-    agent.loc['first_year_elec_bill_savings_with_batt']         = first_without_w - first_with_w
 
     # Keep per-kW PV profile for downstream use/debug
     agent.loc['pv_per_kw_hourly'] = gen_per_kw.tolist()
