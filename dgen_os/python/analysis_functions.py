@@ -31,7 +31,7 @@ NEEDED_COLS = [
     "new_adopters",                 # new adopters in that year (cohort size)
     "number_of_adopters",           # cumulative adopters in that year
     "customers_in_bin",
-    "batt_adopters_this_year",      # storage adopters in that cohort (may be 0/missing)
+    "batt_adopters_added_this_year",      # storage adopters in that cohort (may be 0/missing)
 
     # Savings arrays (25-year, from agent_finance_series):
     "cf_energy_value_pv_only",
@@ -586,11 +586,9 @@ def facet_state_peak_timeseries_from_hourly(
 # =============================================================================
 
 @dataclass
-@dataclass
 class SavingsConfig:
     lifetime_years: int = 25
     cap_to_horizon: bool = False
-    bill_savings_annual_escalation_pct: float = 0.0  # kept for compatibility; not used with arrays
 
 
 def _arr25(x) -> List[float]:
@@ -611,7 +609,7 @@ def compute_portfolio_and_cumulative_savings(
     and (2) cumulative bill savings (cumsum of annual), plus (3) lifetime totals per state/scenario.
 
     Uses:
-      - new_adopters and batt_adopters_this_year to split cohorts into pv_only vs pv_batt.
+      - new_adopters and batt_adopters_added_this_year to split cohorts into pv_only vs pv_batt.
       - cf_energy_value_pv_only, cf_energy_value_pv_batt arrays (per-adopter savings).
     """
     if df.empty:
@@ -623,8 +621,8 @@ def compute_portfolio_and_cumulative_savings(
 
     # cohort sizes
     x["new_adopters"] = pd.to_numeric(x.get("new_adopters", 0.0), errors="coerce").fillna(0.0).clip(lower=0.0)
-    x["batt_adopters_this_year"] = pd.to_numeric(x.get("batt_adopters_this_year", 0.0), errors="coerce").fillna(0.0).clip(lower=0.0)
-    x["pv_batt_n"] = np.minimum(x["batt_adopters_this_year"], x["new_adopters"])
+    x["batt_adopters_added_this_year"] = pd.to_numeric(x.get("batt_adopters_added_this_year", 0.0), errors="coerce").fillna(0.0).clip(lower=0.0)
+    x["pv_batt_n"] = np.minimum(x["batt_adopters_added_this_year"], x["new_adopters"])
     x["pv_only_n"] = (x["new_adopters"] - x["pv_batt_n"]).clip(lower=0.0)
 
     # arrays
@@ -728,7 +726,7 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
     for c in ("year","new_adopters","number_of_adopters",
               "customers_in_bin","max_market_share","system_kw","new_system_kw",
               "system_kw_cum","batt_kwh","batt_kwh_cum","price_per_kwh",
-              "initial_batt_kwh","batt_adopters_this_year","load_kwh_per_customer_in_bin_initial"):
+              "initial_batt_kwh","batt_adopters_added_this_year","load_kwh_per_customer_in_bin_initial"):
         if c in x.columns:
             x[c] = pd.to_numeric(x[c], errors="coerce")
 
@@ -736,7 +734,7 @@ def aggregate_state_metrics(df: pd.DataFrame, cfg: SavingsConfig) -> Dict[str, p
         "new_adopters": 0.0, "number_of_adopters": 0.0,
         "customers_in_bin": 0.0, "max_market_share": 0.0, "system_kw": 0.0,
         "new_system_kw": 0.0, "system_kw_cum": 0.0, "batt_kwh_cum": 0.0,
-        "initial_batt_kwh": 0.0, "batt_adopters_this_year": 0.0,
+        "initial_batt_kwh": 0.0, "batt_adopters_added_this_year": 0.0,
         "load_kwh_per_customer_in_bin_initial": 0.0,
     }
     for c, v in defaults.items():
@@ -968,13 +966,13 @@ def _process_one_state(args) -> Dict[str, pd.DataFrame]:
                     "customers_in_bin", "max_market_share",
                     "avg_elec_price_cents_per_kwh",
                     "initial_batt_kwh", "initial_number_of_adopters",
-                    "batt_adopters_this_year", "load_kwh_per_customer_in_bin_initial"):
+                    "batt_adopters_added_this_year", "load_kwh_per_customer_in_bin_initial"):
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
         for col in ("new_adopters", "number_of_adopters",
                     "customers_in_bin", "max_market_share",
                     "system_kw_cum", "batt_kwh_cum",
-                    "batt_adopters_this_year", "load_kwh_per_customer_in_bin_initial"):
+                    "batt_adopters_added_this_year", "load_kwh_per_customer_in_bin_initial"):
             if col in df.columns:
                 df[col] = df[col].fillna(0.0)
     return aggregate_state_metrics(df, cfg)
@@ -1471,42 +1469,6 @@ def bar_tech_potential_2040(tech_agg: pd.DataFrame, title: str = "Solar Technica
     plt.ylim(0, tech_agg["percent_tech_potential"].max() * 1.1)
     plt.show()
 
-
-# =============================================================================
-# Convenience exports (unchanged)
-# =============================================================================
-
-__all__ = [
-    # I/O & discovery
-    "discover_state_dirs",
-    "find_state_files",
-    "load_state_peaks_df",
-    "process_all_states_peaks",
-
-    # Hourly plotting helpers
-    "plot_state_netload",
-    "facet_state_peak_timeseries_from_hourly",
-
-    # Config & processing
-    "SavingsConfig",
-    "aggregate_state_metrics",
-    "compute_portfolio_and_cumulative_savings",
-    "process_all_states",
-
-    # State plots
-    "facet_lines_by_state",
-    "facet_peaks_by_state",
-    "facet_median_storage_by_state",
-
-    # National
-    "build_national_deltas",
-    "build_national_totals",
-    "facet_lines_national_totals",
-
-    # Other
-    "bar_tech_potential_2040",
-]
-
 def export_compiled_results_to_excel(
     outputs: Dict[str, pd.DataFrame],
     run_id: str,
@@ -1569,13 +1531,13 @@ def choropleth_pv_delta_gw_policy_vs_baseline(
     k_bins: int = 10,  # Jenks classes
 ) -> pd.DataFrame:
     """
-    Map absolute PV delta in GW:  ΔGW = (Policy_2040 − Baseline_2040) / 1e6.
+    Map absolute PV installations in millions:  Δ installations = (Policy_2040 − Baseline_2040) / 1e6.
 
     Uses outputs["totals"] from process_all_states(...) which already contains
-    state/year/scenario aggregates including system_kw_cum. No CSV reads here.
+    state/year/scenario aggregates.
 
     Returns a tidy DataFrame with:
-      ['state_abbr','baseline_kw','policy_kw','delta_kw','delta_gw']
+      ['state_abbr','baseline_installations','policy_installations','delta_installations','delta_installations_millions']
     """
 
     # ---- grab processed totals (already built upstream) ----
@@ -1583,23 +1545,23 @@ def choropleth_pv_delta_gw_policy_vs_baseline(
     if totals.empty:
         raise ValueError("outputs['totals'] is empty; run process_all_states(...) first.")
 
-    need = {"state_abbr", "year", "scenario", "system_kw_cum"}
+    need = {"state_abbr", "year", "scenario", "number_of_adopters"}
     if not need.issubset(totals.columns):
         missing = need - set(totals.columns)
         raise ValueError(f"outputs['totals'] missing columns: {sorted(missing)}")
 
-    s = totals.loc[totals["year"] == year, ["state_abbr", "scenario", "system_kw_cum"]].copy()
+    s = totals.loc[totals["year"] == year, ["state_abbr", "scenario", "number_of_adopters"]].copy()
     # pivot to [state] x {baseline, policy}
-    piv = s.pivot_table(index="state_abbr", columns="scenario", values="system_kw_cum", aggfunc="sum")
+    piv = s.pivot_table(index="state_abbr", columns="scenario", values="number_of_adopters", aggfunc="sum")
     # Make sure expected columns exist
     for col in ("baseline", "policy"):
         if col not in piv.columns:
             piv[col] = np.nan
 
     df = piv.reset_index().rename_axis(None, axis=1)
-    df["delta_kw"] = df["policy"] - df["baseline"]
-    df["delta_gw"] = df["delta_kw"] / 1_000_000.0
-    df = df.rename(columns={"baseline": "baseline_kw", "policy": "policy_kw"})
+    df["delta_installations"] = df["policy"] - df["baseline"]
+    df["delta_installations_millions"] = df["delta_installations"] / 1e6
+    df = df.rename(columns={"baseline": "baseline_installations", "policy": "policy_installations"})
 
     # ---- map join & plot (contiguous U.S.; exclude AK & HI) ----
     gdf = gpd.read_file(shapefile_path).to_crs("EPSG:5070")
@@ -1626,30 +1588,24 @@ def choropleth_pv_delta_gw_policy_vs_baseline(
         plot_kwargs_extra = dict(k=int(k_bins))
 
     fig, ax = plt.subplots(1, 1, figsize=(12, 7))
+    plt.rcParams["font.family"] = "Cabin"
     plot_df.plot(
-        column="delta_gw",
+        column="delta_installations_millions",
         cmap="Blues",
         linewidth=0.6,
         edgecolor="grey",
         legend=True,
         scheme=scheme,
-        legend_kwds={"title": f"Policy − Baseline PV in {year} (GW)", 
+        legend_kwds={"title": f"Installations in Millions", 
                      "ncols":2, "fmt": "{:.1f}", "loc":"lower left"},
         ax=ax,
         missing_kwds={"color": "lightgray"},
         **plot_kwargs_extra,
     )
-    ax.set_title(f"PV Capacity Δ in {year}: Policy − Baseline (GW) — Contiguous U.S.", fontsize=14)
+    ax.set_title(f"Additional Solar Installations in 2040 by State", fontsize=14)
     ax.axis("off")
     plt.tight_layout()
     plt.show()
-
-    # Tidy table out
-    out = (plot_df[["STUSPS", "baseline_kw", "policy_kw", "delta_kw", "delta_gw"]]
-           .rename(columns={"STUSPS": "state_abbr"})
-           .sort_values("state_abbr")
-           .reset_index(drop=True))
-    return out
 
 def policy_only_bill_price_diffs_after_adoption(
     root_dir: str,
@@ -1738,13 +1694,10 @@ def policy_only_bill_price_diffs_after_adoption(
 
 
 def plot_us_cum_adopters_grouped(outputs: Dict[str, pd.DataFrame],
-                                 xticks: Iterable[int] = (2026, 2030, 2035, 2040),
-                                 title: str = "U.S. Cumulative Adopters — Baseline vs Policy (Grouped Bars)") -> pd.DataFrame:
+                                 xticks: Iterable[int] = (2026, 2030, 2035, 2040)) -> pd.DataFrame:
     """
     Grouped bar plot of *national cumulative adopters* by year,
-    with Baseline vs Policy as the bar groups.
-
-    Reuses existing national aggregation logic (via build_national_totals in this file).
+    comparing Status Quo vs. $1/Watt.
 
     Returns the tidy table used for plotting:
         ['year','scenario','value'] where value = U.S. total cumulative adopters
@@ -1758,25 +1711,655 @@ def plot_us_cum_adopters_grouped(outputs: Dict[str, pd.DataFrame],
     if d.empty:
         raise ValueError("National totals lack 'number_of_adopters' metric.")
 
+    # Map scenario labels to custom names
+    rename_map = {
+        "baseline": "Status Quo",
+        "policy": "$1/Watt"
+    }
+    d["scenario"] = d["scenario"].map(rename_map).fillna(d["scenario"])
+
     # Plot
+    plt.rcParams["font.family"] = "Cabin"
     plt.figure(figsize=(12, 5), constrained_layout=True)
-    ax = sns.barplot(data=d, x="year", y="value", hue="scenario", errorbar=None, palette=["#a2e0fc", "#1bb3ef"])
-    ax.set_title(title)
-    ax.set_xlabel("Year")
-    ax.set_ylabel("Cumulative adopters (millions)")
-    # ax.set_xticks(list(xticks))
+    ax = sns.barplot(
+        data=d, x="year", y="value", hue="scenario",
+        errorbar=None, palette=["#a2e0fc", "#1bb3ef"]
+    )
+    ax.set_title("Solar Adoption - Status Quo vs. $1/Watt")
+    ax.set_xlabel("")
+    ax.set_ylabel("Solar Installations (millions)")
+
+    # Format y-axis in millions
+    ax.yaxis.set_major_formatter(
+        plt.FuncFormatter(lambda x, _: f"{x/1e6:.0f}")
+    )
 
     # annotate bars in millions
     for c in ax.containers:
-        ax.bar_label(c, labels=[f"{v/1e6:.1f}M" if np.isfinite(v) else "" for v in c.datavalues],
-                     padding=2, fontsize=9)
+        ax.bar_label(
+            c, labels=[f"{v/1e6:.1f}M" if np.isfinite(v) else "" for v in c.datavalues],
+            padding=2, fontsize=9
+        )
 
-    plt.legend(title=None, frameon=False)
+    # Legend formatting
+    plt.legend(title=None, frameon=False, fontsize=12)
+
+    # Remove grid lines
+    ax.grid(False)
+
     plt.show()
     return d.sort_values(["year", "scenario"]).reset_index(drop=True)
 
+def _weighted_median_simple(values: "pd.Series", weights: "pd.Series") -> float:
+    """Small local helper: weighted median ignoring NaNs and nonpositive weights."""
+    v = pd.to_numeric(values, errors="coerce")
+    w = pd.to_numeric(weights, errors="coerce").fillna(0.0).clip(lower=0.0)
+    mask = v.notna() & (w > 0)
+    if not mask.any():
+        return float("nan")
+    v = v[mask].to_numpy()
+    w = w[mask].to_numpy()
+    order = np.argsort(v)
+    v, w = v[order], w[order]
+    cw = np.cumsum(w)
+    cutoff = 0.5 * w.sum()
+    idx = int(np.searchsorted(cw, cutoff, side="left"))
+    return float(v[min(idx, len(v) - 1)])
 
 
+def build_payback_timeseries(
+    root_dir: str,
+    run_id: str | None = None,
+    strict_run_id: bool = True,
+    level: str = "state"  # "state" or "US"
+) -> "pd.DataFrame":
+    """
+    Build an adoption-weighted *average (mean)* payback series by year for baseline vs policy.
+
+    NOTE: For backward compatibility, the output column is named
+          'payback_weighted_median' even though it is a weighted *mean*.
+
+    Expects per-state CSVs with columns:
+      - state_abbr, year, scenario, new_adopters, payback_period
+
+    Returns:
+      ['geo','scenario','year','payback_weighted_median']
+        where geo = state_abbr (level="state") or 'US' (level="US")
+    """
+    frames = []
+    for state_dir in discover_state_dirs(root_dir):
+        b_csv, p_csv = find_state_files(state_dir, run_id=run_id, strict_run_id=strict_run_id)
+        for path in (b_csv, p_csv):
+            if not path:
+                continue
+            try:
+                df = pd.read_csv(path, usecols=["state_abbr", "year", "scenario", "new_adopters", "payback_period"])
+            except Exception:
+                continue
+            if "scenario" not in df.columns:
+                fn = os.path.basename(path).lower()
+                df["scenario"] = "policy" if "policy" in fn else ("baseline" if "baseline" in fn else np.nan)
+            frames.append(df)
+
+    if not frames:
+        return pd.DataFrame(columns=["geo","scenario","year","payback_weighted_median"])
+
+    x = pd.concat(frames, ignore_index=True)
+
+    # Coerce numerics
+    x["year"] = pd.to_numeric(x.get("year"), errors="coerce")
+    x["new_adopters"] = pd.to_numeric(x.get("new_adopters"), errors="coerce").fillna(0.0).clip(lower=0.0)
+    x["payback_period"] = pd.to_numeric(x.get("payback_period"), errors="coerce")
+
+    # Keep rows with adopters, valid year, and valid payback
+    x = x[(x["new_adopters"] > 0) & x["year"].notna() & x["payback_period"].notna()].copy()
+
+    if level.lower() == "state":
+        grp_keys = ["state_abbr", "scenario", "year"]
+        geo_col = "state_abbr"
+    else:
+        # National: pool all states before averaging
+        x["geo"] = "US"
+        grp_keys = ["geo", "scenario", "year"]
+        geo_col = "geo"
+
+    # Vectorized weighted mean: sum(w * v) / sum(w)
+    x["__w"] = x["new_adopters"]
+    x["__wv"] = x["payback_period"] * x["__w"]
+
+    agg = (
+        x.groupby(grp_keys, observed=True)[["__w", "__wv"]]
+         .sum()
+         .reset_index()
+    )
+    agg["payback_weighted_median"] = np.where(
+        agg["__w"] > 0, agg["__wv"] / agg["__w"], np.nan
+    )
+
+    # Tidy output
+    out_cols = [geo_col, "scenario", "year", "payback_weighted_median"]
+    out = agg[out_cols].rename(columns={geo_col: "geo"}).sort_values(["geo","scenario","year"])
+    return out.reset_index(drop=True)
+
+
+
+def summarize_affordability_milestones(
+    payback_ts: "pd.DataFrame",
+    thresholds: tuple[float, ...] = (15.0, 10.0, 5.0)
+) -> "pd.DataFrame":
+    """
+    From a payback time series (output of build_payback_timeseries), compute:
+      - First year baseline reaches each threshold
+      - First year policy reaches each threshold
+      - Advantage (years earlier under policy; positive = policy sooner)
+      - Crossover flag (baseline never reaches but policy does)
+
+    Returns columns:
+      ['geo','threshold_years','baseline_year','policy_year','advantage_years','crossover']
+    """
+    if payback_ts.empty:
+        return pd.DataFrame(columns=["geo","threshold_years","baseline_year","policy_year","advantage_years","crossover"])
+
+    # Ensure sorting for "first year" logic
+    d = payback_ts.dropna(subset=["payback_weighted_median","year"]).sort_values(["geo","scenario","year"]).copy()
+
+    # Helper: first year ≤ threshold for a single series
+    def _first_year_le(g: "pd.DataFrame", thr: float) -> float | None:
+        m = g[g["payback_weighted_median"] <= thr]
+        if m.empty:
+            return None
+        return float(m["year"].iloc[0])
+
+    rows = []
+    for geo, g_geo in d.groupby("geo", observed=True):
+        b = g_geo[g_geo["scenario"].str.lower() == "baseline"]
+        p = g_geo[g_geo["scenario"].str.lower() == "policy"]
+        for thr in thresholds:
+            yb = _first_year_le(b, thr)
+            yp = _first_year_le(p, thr)
+            # advantage: years baseline - policy (positive => policy earlier)
+            adv = (yb - yp) if (yb is not None and yp is not None) else (None if yp is None else float("inf"))
+            crossover = (yb is None and yp is not None)
+            rows.append({
+                "geo": geo,
+                "threshold_years": float(thr),
+                "baseline_year": yb,
+                "policy_year": yp,
+                "advantage_years": adv,
+                "crossover": crossover,
+            })
+    out = pd.DataFrame(rows)
+    return out.sort_values(["geo","threshold_years"]).reset_index(drop=True)
+
+
+def table_crossover_states(
+    milestones: "pd.DataFrame",
+    threshold: float = 10.0,
+    top_n: int = 10
+) -> "pd.DataFrame":
+    """
+    Convenience view: states where policy achieves ≤threshold and baseline does not,
+    or policy achieves it earlier. Sorted by largest advantage (years).
+
+    Returns columns:
+      ['geo','baseline_year','policy_year','advantage_years','crossover']
+    """
+    if milestones.empty:
+        return pd.DataFrame(columns=["geo","baseline_year","policy_year","advantage_years","crossover"])
+    m = milestones[milestones["threshold_years"] == float(threshold)].copy()
+    m["adv_sort"] = m["advantage_years"].replace({np.inf: 1e9})
+    m = m[(m["crossover"] == True) | (m["adv_sort"] > 0)].sort_values("adv_sort", ascending=False)
+    cols = ["geo","baseline_year","policy_year","advantage_years","crossover"]
+    return m[cols].head(top_n).reset_index(drop=True)
+
+def payback_threshold_flags(
+    root_dir: str,
+    run_id: str | None = None,
+    strict_run_id: bool = True,
+    threshold_years: float = 5.0,
+    year: int = 2040,
+    long_format: bool = True,
+) -> "pd.DataFrame":
+    """
+    Build flags indicating whether each state meets an adoption-weighted payback threshold
+    in a given YEAR, for both scenarios.
+
+    If long_format=True (default), returns:
+      ['state_abbr','scenario','flag']  (one row per state×scenario)
+
+    If long_format=False, returns the previous wide shape:
+      ['state_abbr','baseline_flag','policy_flag']
+    """
+    pb = build_payback_timeseries(
+        root_dir=root_dir, run_id=run_id, strict_run_id=strict_run_id, level="state"
+    )
+    if pb.empty:
+        return pd.DataFrame(columns=(["state_abbr","scenario","flag"] if long_format
+                                     else ["state_abbr","baseline_flag","policy_flag"]))
+
+    d = pb.copy()
+    d["year"] = pd.to_numeric(d["year"], errors="coerce")
+    d = d[d["year"] == year].copy()
+    if d.empty:
+        return pd.DataFrame(columns=(["state_abbr","scenario","flag"] if long_format
+                                     else ["state_abbr","baseline_flag","policy_flag"]))
+
+    d["scenario"] = d["scenario"].astype(str).str.lower().str.strip()
+    d["geo"] = d["geo"].astype(str).str.upper()
+    d["flag"] = pd.to_numeric(d["payback_weighted_median"], errors="coerce") <= float(threshold_years)
+
+    # Dedup by OR if multiples
+    agg = (d.groupby(["geo","scenario"], as_index=False)["flag"].max()
+             .rename(columns={"geo":"state_abbr"}))
+    agg["state_abbr"] = agg["state_abbr"].astype(str).str.upper()
+
+    if long_format:
+        return agg[["state_abbr","scenario","flag"]].reset_index(drop=True)
+
+    # wide (back-compat)
+    piv = agg.pivot(index="state_abbr", columns="scenario", values="flag").reset_index()
+    for col in ("baseline","policy"):
+        if col not in piv.columns:
+            piv[col] = False
+    piv = piv.rename(columns={"baseline":"baseline_flag","policy":"policy_flag"})
+    return piv[["state_abbr","baseline_flag","policy_flag"]].reset_index(drop=True)
+
+def facet_choropleth_payback_continuous(
+    root_dir: str,
+    shapefile_path: str,
+    run_id: str | None = None,
+    strict_run_id: bool = True,
+    year: int = 2040,
+    cmap: str = "Blues_r",   # reversed so lower payback = darker (more affordable)
+) -> "pd.DataFrame":
+    """
+    Vertically faceted choropleth of adoption-weighted *average payback (years)* in `year`.
+      - Top: Baseline
+      - Bottom: Policy
+    Uses a shared color scale so the two maps are directly comparable.
+
+    Returns the tidy table used to plot: ['state_abbr','scenario','payback_years']
+    """
+    import matplotlib.pyplot as plt
+
+    # 1) Build state-level payback (you already switched this function to weighted *mean*)
+    pb = build_payback_timeseries(root_dir=root_dir, run_id=run_id,
+                                  strict_run_id=strict_run_id, level="state")
+    if pb.empty:
+        raise ValueError("No payback data found. Make sure baseline/policy CSVs include 'payback_period' and 'new_adopters'.")
+
+    d = pb.copy()
+    d["year"] = pd.to_numeric(d["year"], errors="coerce")
+    d = d[(d["year"] == year) & d["geo"].notna() & d["scenario"].notna()].copy()
+    d = d.rename(columns={"geo": "state_abbr", "payback_weighted_median": "payback_years"})
+    d["state_abbr"] = d["state_abbr"].astype(str).str.upper()
+    d["scenario"] = d["scenario"].astype(str).str.lower().str.strip()
+
+    # Keep only baseline/policy
+    d = d[d["scenario"].isin(["baseline", "policy"])]
+    if d.empty:
+        raise ValueError(f"No baseline/policy payback rows for year {year}.")
+
+    # 2) Load shapefile and prep join key
+    gdf = gpd.read_file(shapefile_path).to_crs("EPSG:5070")
+    if "STUSPS" not in gdf.columns:
+        for c in ("stusps","STATE_ABBR","STATE","STATEFP","STATEFP20"):
+            if c in gdf.columns:
+                gdf["STUSPS"] = gdf[c].astype(str).str.upper()
+                break
+    if "STUSPS" not in gdf.columns:
+        raise ValueError("Shapefile must include a two-letter state code (e.g., STUSPS).")
+
+    gdf["STUSPS"] = gdf["STUSPS"].astype(str).str.upper()
+    # Contiguous U.S. map
+    gdf = gdf[~gdf["STUSPS"].isin({"AK","HI","PR","GU","VI","AS","MP","DC"})].copy()
+
+    # 3) Shared color scale across both scenarios (min/max over both)
+    vmin = float(np.nanmin(d["payback_years"].values))
+    vmax = float(np.nanmax(d["payback_years"].values))
+    if not np.isfinite(vmin) or not np.isfinite(vmax):
+        raise ValueError("Payback values are not finite; check inputs.")
+
+    # 4) Plot: two panels, legend only on the Policy panel
+    fig, axes = plt.subplots(2, 1, figsize=(10, 12), constrained_layout=True)
+    plt.rcParams["font.family"] = "Cabin"
+
+    for ax, scen, title in [
+        (axes[0], "baseline", f"Business-as-usual: Payback (Years) in {year}"),
+        (axes[1], "policy",   f"$1 per Watt: Payback (Years) in {year}"),
+    ]:
+        sub = d[d["scenario"] == scen][["state_abbr","payback_years"]]
+        m = gdf.merge(sub.rename(columns={"state_abbr":"STUSPS"}), on="STUSPS", how="left")
+
+        m.plot(
+            column="payback_years",
+            cmap=cmap,
+            vmin=vmin, vmax=vmax,
+            linewidth=0.6, edgecolor="grey",
+            legend=(scen == "policy"),  # legend only on bottom facet
+            legend_kwds={
+                "label": "Payback (years)",
+                "orientation": "horizontal",
+                "shrink": 0.8,
+                "pad": 0.02,
+            },
+            ax=ax,
+            missing_kwds={"color": "#f5f5f5"},
+        )
+        ax.set_title(title, fontsize=13)
+        ax.axis("off")
+
+        # Simple join sanity check
+        missing = sorted(set(sub["state_abbr"]) - set(m["STUSPS"]))
+        if missing:
+            print(f"[Warning] Missing states in join for '{scen}': {missing}")
+
+    plt.show()
+    # Return the tidy values used to paint the map
+    return d[["state_abbr","scenario","payback_years"]].reset_index(drop=True)
+
+
+def build_eabs_calendar_timeseries(
+    root_dir: str,
+    run_id: str | None = None,
+    strict_run_id: bool = True,
+    level: str = "state",  # "state" or "US"
+) -> "pd.DataFrame":
+    """
+    Calendar-year, adoption-weighted average bill metrics from 25-yr cohorts that adopt in prior years.
+    Assumes these columns exist in each per-state CSV (new schema):
+      - utility_bill_w_sys_pv_only, utility_bill_w_sys_pv_batt
+      - utility_bill_wo_sys_pv_only, utility_bill_wo_sys_pv_batt
+    Also uses: state_abbr, year, scenario, new_adopters, batt_adopters_added_this_year
+
+    Outputs per geo×scenario×year:
+      - adopters_active: total adopters present in that calendar year
+      - avg_bill_with:   adoption-weighted avg bill WITH system (USD/yr per adopter)
+      - avg_bill_wo:     adoption-weighted avg bill WITHOUT system (USD/yr per adopter)
+      - eabs:            avg annual bill savings = avg_bill_wo - avg_bill_with
+      - pct_savings:     eabs / avg_bill_wo
+    """
+
+    USECOLS = [
+        "state_abbr","year","scenario","new_adopters","batt_adopters_added_this_year",
+        "utility_bill_w_sys_pv_only","utility_bill_w_sys_pv_batt",
+        "utility_bill_wo_sys_pv_only","utility_bill_wo_sys_pv_batt",
+    ]
+
+    frames = []
+    for state_dir in discover_state_dirs(root_dir):
+        b_csv, p_csv = find_state_files(state_dir, run_id=run_id, strict_run_id=strict_run_id)
+        for path in (b_csv, p_csv):
+            if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
+                continue
+            try:
+                df = pd.read_csv(path, usecols=USECOLS)
+            except Exception:
+                continue
+            if "scenario" not in df.columns:
+                fn = os.path.basename(path).lower()
+                df["scenario"] = "policy" if "policy" in fn else ("baseline" if "baseline" in fn else np.nan)
+            frames.append(df)
+
+    if not frames:
+        return pd.DataFrame(columns=["geo","scenario","year","adopters_active","avg_bill_with","avg_bill_wo","eabs","pct_savings"])
+
+    x = pd.concat(frames, ignore_index=True)
+
+    # Clean + derive cohort sizes
+    x["year"] = pd.to_numeric(x["year"], errors="coerce")
+    x["new_adopters"] = pd.to_numeric(x["new_adopters"], errors="coerce").fillna(0.0).clip(lower=0.0)
+    x["batt_adopters_added_this_year"] = pd.to_numeric(x["batt_adopters_added_this_year"], errors="coerce").fillna(0.0).clip(lower=0.0)
+    x["pv_batt_n"] = np.minimum(x["batt_adopters_added_this_year"], x["new_adopters"])
+    x["pv_only_n"] = (x["new_adopters"] - x["pv_batt_n"]).clip(lower=0.0)
+
+    # Parse arrays (length-25) — assumes _arr25 exists in your module
+    x["bw_only"] = x["utility_bill_w_sys_pv_only"].apply(_arr25)
+    x["bw_batt"] = x["utility_bill_w_sys_pv_batt"].apply(_arr25)
+    x["bo_only"] = x["utility_bill_wo_sys_pv_only"].apply(_arr25)
+    x["bo_batt"] = x["utility_bill_wo_sys_pv_batt"].apply(_arr25)
+
+    # Calendar-year bounds (we only report within the modeled horizon)
+    years = x["year"].dropna()
+    if years.empty:
+        return pd.DataFrame(columns=["geo","scenario","year","adopters_active","avg_bill_with","avg_bill_wo","eabs","pct_savings"])
+    y_min, y_max = int(years.min()), int(years.max())
+
+    bucket: dict[tuple[str,str,int], tuple[float,float,float]] = {}
+    for r in x.itertuples(index=False):
+        if pd.isna(r.year) or not r.scenario:
+            continue
+        y0 = int(r.year)
+        geos = [r.state_abbr] if level.lower() == "state" else ["US"]
+
+        pw_only, pw_batt = float(r.pv_only_n or 0.0), float(r.pv_batt_n or 0.0)
+        a_bw_only, a_bw_batt = list(r.bw_only or []), list(r.bw_batt or [])
+        a_bo_only, a_bo_batt = list(r.bo_only or []), list(r.bo_batt or [])
+
+        # Roll forward each life-year k into calendar year y0+k
+        for k in range(25):
+            y = y0 + k
+            if y < y_min or y > y_max:
+                continue
+
+            sum_with = (a_bw_only[k]*pw_only if k < len(a_bw_only) and pw_only>0 else 0.0) + \
+                       (a_bw_batt[k]*pw_batt if k < len(a_bw_batt) and pw_batt>0 else 0.0)
+            sum_wo   = (a_bo_only[k]*pw_only if k < len(a_bo_only) and pw_only>0 else 0.0) + \
+                       (a_bo_batt[k]*pw_batt if k < len(a_bo_batt) and pw_batt>0 else 0.0)
+            adopters = (pw_only if (k < len(a_bo_only) or k < len(a_bw_only)) else 0.0) + \
+                       (pw_batt if (k < len(a_bo_batt) or k < len(a_bw_batt)) else 0.0)
+
+            if (sum_with != 0.0) or (sum_wo != 0.0) or (adopters > 0.0):
+                for geo in geos:
+                    key = (geo, r.scenario, y)
+                    sw, so, na = bucket.get(key, (0.0, 0.0, 0.0))
+                    bucket[key] = (sw + sum_with, so + sum_wo, na + adopters)
+
+    if not bucket:
+        return pd.DataFrame(columns=["geo","scenario","year","adopters_active","avg_bill_with","avg_bill_wo","eabs","pct_savings"])
+
+    rows = []
+    for (geo, scen, y), (sum_with, sum_wo, adopters) in bucket.items():
+        if adopters > 0:
+            avg_with = sum_with / adopters
+            avg_wo   = sum_wo   / adopters
+            eabs     = avg_wo - avg_with
+            pct      = (eabs / avg_wo) if avg_wo > 0 else 0.0
+        else:
+            # If no adopters active that year in this geo×scenario, define savings as 0 by convention.
+            avg_with = 0.0
+            avg_wo   = 0.0
+            eabs     = 0.0
+            pct      = 0.0
+        rows.append((geo, scen, int(y), float(adopters), float(avg_with), float(avg_wo), float(eabs), float(pct)))
+
+    out = pd.DataFrame(rows, columns=["geo","scenario","year","adopters_active","avg_bill_with","avg_bill_wo","eabs","pct_savings"])
+    out = out.sort_values(["geo","scenario","year"]).reset_index(drop=True)
+    return out
+
+
+def summarize_us_eabs_for_year(eabs_ts: "pd.DataFrame", year: int = 2040) -> "pd.DataFrame":
+    """
+    Return a compact table for US only in `year`:
+      ['scenario','year','adopters_active','avg_bill_wo','avg_bill_with','eabs','pct_savings']
+    """
+    d = eabs_ts[(eabs_ts["geo"] == "US") & (eabs_ts["year"] == int(year))].copy()
+    keep = ["scenario","year","adopters_active","avg_bill_wo","avg_bill_with","eabs","pct_savings"]
+    return d[keep].sort_values("scenario").reset_index(drop=True)
+
+def table_top_states_by_eabs(
+    eabs_ts: "pd.DataFrame",
+    year: int = 2040,
+    scenario: str = "policy",
+    top_n: int = 5
+) -> "pd.DataFrame":
+    """
+    Return top-N states by EABS in `year` for the chosen `scenario`,
+    including avg bills with/without system.
+      ['state_abbr','eabs','pct_savings','avg_bill_wo','avg_bill_with','adopters_active']
+    """
+    d = eabs_ts[(eabs_ts["geo"] != "US") & (eabs_ts["year"] == int(year)) & (eabs_ts["scenario"].str.lower() == scenario.lower())].copy()
+    if d.empty:
+        return pd.DataFrame(columns=["state_abbr","eabs","pct_savings","avg_bill_wo","avg_bill_with","adopters_active"])
+    d = d.rename(columns={"geo":"state_abbr"})
+    keep = ["state_abbr","eabs","pct_savings","avg_bill_wo","avg_bill_with","adopters_active"]
+    return (d[keep].sort_values("pct_savings", ascending=False).head(int(top_n)).reset_index(drop=True))
+
+def build_population_denominator_from_agents(
+    root_dir: str,
+    run_id: str | None = None,
+    strict_run_id: bool = True,
+) -> "pd.DataFrame":
+    """
+    Denominator from per-agent BASELINE CSVs.
+    Uses ONLY `customers_in_bin` as the population weight and k=0 of the without-system bill array.
+
+    Returns: ['state_abbr','year','households','denominator_usd']
+    """
+
+    pieces = []
+    for state_dir in discover_state_dirs(root_dir):
+        b_csv, _ = find_state_files(state_dir, run_id=run_id, strict_run_id=strict_run_id)
+        if not b_csv:
+            print("Csv not found")
+            continue
+
+        df = pd.read_csv(b_csv, low_memory=False)
+
+        # If there's a scenario col, keep baseline rows; otherwise assume this is the baseline file.
+        if "scenario" in df.columns:
+            df = df[df["scenario"].str.lower() == "baseline"]
+
+        # Pick wo_sys array column (prefer pv_only)
+        wo_col = "utility_bill_wo_sys_pv_only" if "utility_bill_wo_sys_pv_only" in df.columns else "utility_bill_wo_sys_pv_batt"
+
+        # Minimal subset
+        d = df[["state_abbr", "year", "customers_in_bin", wo_col]].copy()
+
+        # First life-year (k=0) of the without-system bill array
+        d["wo0"] = d[wo_col].apply(_arr25).str[1]
+
+        # Product and aggregate
+        d["prod"] = d["customers_in_bin"] * d["wo0"]
+        g = (d.groupby(["state_abbr","year"], as_index=False)
+               .agg(households=("customers_in_bin","sum"),
+                    denominator_usd=("prod","sum")))
+        pieces.append(g)
+
+    if not pieces:
+        return pd.DataFrame(columns=["state_abbr","year","households","denominator_usd"])
+
+    out = pd.concat(pieces, ignore_index=True)
+    out["state_abbr"] = out["state_abbr"].astype(str).str.upper()
+    return out.sort_values(["state_abbr","year"]).reset_index(drop=True)
+
+def compute_us_percent_savings_internal(
+    eabs_state_ts: "pd.DataFrame",
+    denom_state_year: "pd.DataFrame",
+) -> "pd.DataFrame":
+    """
+    Numerator from EABS (state × year × scenario):
+      total_savings = eabs * adopters_active
+
+    Denominator from per-agent baseline:
+      denom_state_year: ['state_abbr','year','households','denominator_usd']
+
+    Returns US series:
+      ['scenario','year','percent_savings','total_savings_usd','denominator_usd']
+    """
+
+    s = eabs_state_ts.copy()
+    s["state_abbr"] = s["geo"].astype(str).str.upper()
+    s["total_savings_usd"] = (s["eabs"].fillna(0.0) * s["adopters_active"].fillna(0.0)).astype(float)
+
+    D = denom_state_year.copy()
+    D["state_abbr"] = D["state_abbr"].astype(str).str.upper()
+    D["year"] = pd.to_numeric(D["year"], errors="coerce")
+
+    st = s.merge(D[["state_abbr","year","denominator_usd"]], on=["state_abbr","year"], how="left")
+
+    us = (
+        st.groupby(["scenario","year"], as_index=False)
+          .agg(total_savings_usd=("total_savings_usd","sum"),
+               denominator_usd=("denominator_usd","sum"))
+    )
+    us["percent_savings"] = np.where(us["denominator_usd"] > 0,
+                                     us["total_savings_usd"] / us["denominator_usd"],
+                                     np.nan)
+    us["scenario"] = us["scenario"].astype(str).str.lower()
+    return us.sort_values(["scenario","year"]).reset_index(drop=True)
+
+def plot_us_percent_savings(
+    us_pct_ts: "pd.DataFrame",
+    title: str = "Aggregate Annual % Bill Savings Across All Households"
+) -> None:
+
+    # Map scenarios → display labels
+    label_map = {"baseline": "Business-as-usual", "policy": "$1 per watt"}
+    hue_order = ["$1 per watt", "Business-as-usual"]
+    palette = {"Business-as-usual": "#a2e0fc", "$1 per watt": "#1bb3ef"}
+
+    d = us_pct_ts.copy()
+    d["scenario"] = d["scenario"].astype(str).str.lower()
+    d = d[d["scenario"].isin(label_map.keys())].copy()
+    d["scenario_label"] = d["scenario"].map(label_map)
+
+    # Style
+    plt.rcParams["font.family"] = "Cabin"
+    sns.set_context("talk")
+
+    # Plot
+    plt.figure(figsize=(10, 5), constrained_layout=True)
+    ax = sns.lineplot(
+        data=d, x="year", y="percent_savings",
+        hue="scenario_label", hue_order=hue_order,
+        palette=palette, marker="o", linewidth=2
+    )
+
+    ax.set_title(title)
+    ax.set_xlabel("Year")
+    ax.set_ylabel("Percent of Residential Spend Avoided")
+    ax.yaxis.set_major_formatter(lambda y, pos: f"{y*100:.0f}%")
+    ax.legend(title=None, frameon=False, loc="best")
+    ax.grid(True, axis="y", alpha=0.2)
+    plt.show()
+
+
+def table_top_states_by_percent_savings_internal(
+    eabs_state_ts: "pd.DataFrame",
+    denom_state_year: "pd.DataFrame",
+    year: int = 2040,
+    scenario: str = "policy",
+    top_n: int = 5,
+) -> "pd.DataFrame":
+    """
+    Top-N by economy-wide % savings in `year` for `scenario`.
+    Columns:
+      ['state_abbr','percent_savings','total_savings_usd','denominator_usd',
+       'adopters_active','avg_bill_wo_adopters','avg_bill_with_adopters']
+    """
+    import pandas as pd
+    import numpy as np
+
+    s = eabs_state_ts.copy()
+    s = s[(s["scenario"].str.lower() == scenario.lower()) & (s["year"] == int(year))].copy()
+    s["state_abbr"] = s["geo"].astype(str).str.upper()
+    s["total_savings_usd"] = (s["eabs"].fillna(0.0) * s["adopters_active"].fillna(0.0)).astype(float)
+
+    D = denom_state_year.copy()
+    D["state_abbr"] = D["state_abbr"].astype(str).str.upper()
+    D = D[D["year"] == int(year)][["state_abbr","denominator_usd"]]
+
+    out = s.merge(D, on="state_abbr", how="left")
+    out["percent_savings"] = np.where(out["denominator_usd"] > 0,
+                                      out["total_savings_usd"] / out["denominator_usd"],
+                                      np.nan)
+    out = out.rename(columns={"adopters_active":"adopters_active",
+                              "avg_bill_wo":"avg_bill_wo_adopters",
+                              "avg_bill_with":"avg_bill_with_adopters"})
+    cols = ["state_abbr","percent_savings","total_savings_usd","denominator_usd",
+            "adopters_active","avg_bill_wo_adopters","avg_bill_with_adopters"]
+    return out[cols].sort_values("percent_savings", ascending=False).head(int(top_n)).reset_index(drop=True)
 
 
 
