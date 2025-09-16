@@ -243,30 +243,63 @@ def export_one_schema(
                         cur.copy_expert(copy_stmt.as_string(conn), f)
                 agent_done = True
 
-            # --- Hourly export, if present ---
-            hourly_csv = os.path.join(per_state_dir, f"{scenario}_hourly.csv")
-            if overwrite or not (os.path.exists(hourly_csv) and os.path.getsize(hourly_csv) > 0):
+            # --- Hourly export(s), if present ---
+            # Writes:
+            #   <scenario>_state_hourly.csv  from {schema}.state_hourly_agg
+            #   <scenario>_rto_hourly.csv    from {schema}.rto_hourly_agg  (includes `rto`)
+            for table_name, suffix in (("state_hourly_agg", "state_hourly"),
+                                    ("rto_hourly_agg",   "rto_hourly")):
+                hourly_csv = os.path.join(per_state_dir, f"{scenario}_{suffix}.csv")
+
+                if not (overwrite or not (os.path.exists(hourly_csv) and os.path.getsize(hourly_csv) > 0)):
+                    continue  # skip if file exists and we're not overwriting
+
                 # Check table existence
                 cur.execute(
                     """
                     SELECT 1
                     FROM information_schema.tables
-                    WHERE table_schema = %s AND table_name = 'state_hourly_agg'
+                    WHERE table_schema = %s AND table_name = %s
                     LIMIT 1
                     """,
-                    (schema_name,),
+                    (schema_name, table_name),
                 )
                 exists = cur.fetchone() is not None
-                if exists:
+                if not exists:
+                    continue
+
+                if table_name == "rto_hourly_agg":
+                    # RTO export: include the explicit `rto` column
                     select_hourly = _sql.SQL(
                         """
                         SELECT
-                          {scen} AS "scenario",
-                          {sch}  AS "schema",
-                          {st}   AS "state_abbr",
-                          a.year,
-                          a.n_hours,
-                          a.net_sum::text AS net_sum_text
+                        {scen} AS "scenario",
+                        {sch}  AS "schema",
+                        {st}   AS "state_abbr",
+                        a.rto  AS "rto",
+                        a.year,
+                        a.n_hours,
+                        a.net_sum::text AS net_sum_text
+                        FROM {schema}.rto_hourly_agg AS a
+                        ORDER BY a.year, a.rto
+                        """
+                    ).format(
+                        scen=_sql.Literal(scenario),
+                        sch=_sql.Literal(schema_name),
+                        st=_sql.Literal(state.upper()),
+                        schema=_sql.Identifier(schema_name),
+                    )
+                else:
+                    # State export (unchanged schema)
+                    select_hourly = _sql.SQL(
+                        """
+                        SELECT
+                        {scen} AS "scenario",
+                        {sch}  AS "schema",
+                        {st}   AS "state_abbr",
+                        a.year,
+                        a.n_hours,
+                        a.net_sum::text AS net_sum_text
                         FROM {schema}.state_hourly_agg AS a
                         ORDER BY a.year
                         """
@@ -276,9 +309,11 @@ def export_one_schema(
                         st=_sql.Literal(state.upper()),
                         schema=_sql.Identifier(schema_name),
                     )
-                    copy_hourly = _sql.SQL("COPY ({}) TO STDOUT WITH CSV HEADER").format(select_hourly)
-                    with open(hourly_csv, "w", newline="") as f2:
-                        cur.copy_expert(copy_hourly.as_string(conn), f2)
+
+                copy_hourly = _sql.SQL("COPY ({}) TO STDOUT WITH CSV HEADER").format(select_hourly)
+                with open(hourly_csv, "w", newline="") as f2:
+                    cur.copy_expert(copy_hourly.as_string(conn), f2)
+
 
         return (schema_name, out_csv if agent_done else None, None)
 
