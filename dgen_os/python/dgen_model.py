@@ -35,6 +35,11 @@ from attachment_rate_functions import (
     export_state_hourly_with_storage_mix
 )
 
+# Load finance series export helpers
+from finance_series_export import (
+    export_agent_finance_series,
+)
+
 # raise numpy and pandas warnings as exceptions
 pd.set_option('mode.chained_assignment', None)
 # Suppress pandas warnings
@@ -424,7 +429,10 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                 # 3) Export state-level hourly net using the actual cumulative mix (PV-only vs PV+Batt)
                 export_state_hourly_with_storage_mix(engine, schema, owner, year, solar_agents.df)
 
-                # 4) Update cumulatives for next year's state capacity table
+                # 4) Export the 25-year finance/bill arrays (JSONB, narrow table) --
+                export_agent_finance_series(engine, schema, owner, year, solar_agents.df)
+
+                # 5) Update cumulatives for next year's state capacity table
                 last_year_installed_capacity = solar_agents.df[['state_abbr','system_kw_cum','batt_kw_cum','batt_kwh_cum','year']].copy()
                 last_year_installed_capacity = last_year_installed_capacity.loc[last_year_installed_capacity['year'] == year]
                 last_year_installed_capacity = last_year_installed_capacity.groupby('state_abbr')[['system_kw_cum','batt_kw_cum','batt_kwh_cum']].sum().reset_index()
@@ -443,7 +451,9 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                     'total_gen_twh','tariff_dict','deprec_sch','cash_flow',
                     'cbi','ibi','pbi','cash_incentives','state_incentives',
                     'export_tariff_results', 'baseline_net_hourly', 'adopter_net_hourly_pvonly',
-                    'adopter_net_hourly_with_batt', 'adopter_net_hourly', 'wholesale_prices'
+                    'adopter_net_hourly_with_batt', 'adopter_net_hourly', 'wholesale_prices',
+                    'cf_energy_value_pv_only', 'cf_energy_value_pv_batt', 'utility_bill_w_sys_pv_only',
+                    'utility_bill_w_sys_pv_batt', 'utility_bill_wo_sys_pv_only', 'utility_bill_wo_sys_pv_batt'
                 ] if f in solar_agents.df.columns]
                 df_write = solar_agents.df.drop(drop_list, axis=1)
                 df_write.to_pickle(os.path.join(out_scen_path, f'agent_df_{year}.pkl'))
