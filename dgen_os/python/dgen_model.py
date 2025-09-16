@@ -32,7 +32,8 @@ from sqlalchemy.engine import Engine
 from attachment_rate_functions import (
     _load_state_attachment_rates,
     _allocate_battery_adopters_integer,
-    export_state_hourly_with_storage_mix
+    export_state_hourly_with_storage_mix,
+    export_rto_hourly_with_storage_mix
 )
 
 # Load finance series export helpers
@@ -426,8 +427,10 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
 
                 market_last_year_df = ml.reset_index()
 
-                # 3) Export state-level hourly net using the actual cumulative mix (PV-only vs PV+Batt)
+                # 3) Export state- and rto-level hourly net using the actual cumulative mix (PV-only vs PV+Batt)
                 export_state_hourly_with_storage_mix(engine, schema, owner, year, solar_agents.df)
+                export_rto_hourly_with_storage_mix(engine, schema, owner, year, solar_agents.df)
+
 
                 # 4) Export the 25-year finance/bill arrays (JSONB, narrow table) --
                 export_agent_finance_series(engine, schema, owner, year, solar_agents.df)

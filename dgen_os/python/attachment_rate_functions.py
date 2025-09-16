@@ -204,3 +204,49 @@ def export_state_hourly_with_storage_mix(engine, schema, owner, year: int, solar
         rec = pd.DataFrame.from_records(records)
         iFuncs.df_to_psql(rec, engine, schema, owner, "state_hourly_agg",
                           if_exists="append", append_transformations=False)
+        
+def export_rto_hourly_with_storage_mix(engine, schema, owner, year: int, solar_agents_df: pd.DataFrame) -> None:
+    """
+    Simple export of aggregated hourly net load at the RTO level after diffusion.
+    Groups by 'rto' and writes to rto_hourly_agg table.
+    """
+
+    records = []
+    eps = 1e-9
+
+    for rto, g in solar_agents_df.groupby("rto"):
+        n_hours = min(
+            g["baseline_net_hourly"].map(len).min(),
+            g["adopter_net_hourly_pvonly"].map(len).min(),
+            g["adopter_net_hourly_with_batt"].map(len).min(),
+        )
+        net_sum_kw = np.zeros(n_hours, dtype=float)
+
+        for _, r in g.iterrows():
+            base = np.asarray(r["baseline_net_hourly"], dtype=float)[:n_hours]
+            pvo  = np.asarray(r["adopter_net_hourly_pvonly"], dtype=float)[:n_hours]
+            wbt  = np.asarray(r["adopter_net_hourly_with_batt"], dtype=float)[:n_hours]
+
+            n_cust  = float(r["customers_in_bin"])
+            n_adopt = float(r["number_of_adopters"])
+            n_non   = max(n_cust - n_adopt, 0.0)
+
+            prev_batt_cum = float(r["batt_kw_cum_last_year"]) / max(float(r["batt_kw"]) or eps, eps)
+            prev_batt_cum = int(round(max(prev_batt_cum, 0.0)))
+            batt_add_this_year = int(r["batt_adopters_added_this_year"])
+            batt_cum = max(prev_batt_cum + batt_add_this_year, 0)
+            pvo_cum  = max(int(round(n_adopt)) - batt_cum, 0)
+
+            net_sum_kw += (pvo * pvo_cum) + (wbt * batt_cum) + (base * n_non)
+
+        records.append({
+            "rto": str(rto),
+            "year": int(year),
+            "n_hours": int(n_hours),
+            "net_sum": (net_sum_kw / 1000.0).tolist(),  # MW
+        })
+
+    if records:
+        rec = pd.DataFrame.from_records(records)
+        iFuncs.df_to_psql(rec, engine, schema, owner, "rto_hourly_agg",
+                          if_exists="append", append_transformations=False)
