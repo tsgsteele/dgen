@@ -1273,12 +1273,25 @@ def build_national_totals(
 def facet_lines_national_totals(
     outputs: Dict[str, pd.DataFrame],
     peaks_df: Optional[pd.DataFrame] = None,
-    metrics: Optional[Iterable[str]] = ("number_of_adopters", "system_kw_cum", "batt_kwh_cum", "cumulative_bill_savings", "peak_mw"),
+    coincident_df: Optional[pd.DataFrame] = None, 
+    metrics: Optional[Iterable[str]] = ("number_of_adopters", "system_kw_cum", "batt_kwh_cum", "cumulative_bill_savings", "peak_mw", "coincident_reduction_mw"),
     xticks: Iterable[int] = (2026, 2030, 2035, 2040),
     title: str = "U.S. Totals: Baseline vs Policy",
     ncols: int = 3,
 ) -> None:
     nat = build_national_totals(outputs, peaks_df=peaks_df)
+
+    if coincident_df is not None and isinstance(coincident_df, pd.DataFrame) and not coincident_df.empty:
+        need = {"state_abbr","year","coincident_reduction_mw"}
+        if need.issubset(coincident_df.columns):
+            nat_co = (
+                coincident_df.groupby("year", as_index=False)["coincident_reduction_mw"].sum()
+                            .rename(columns={"coincident_reduction_mw":"value"})
+            )
+            nat_co["scenario"] = "coincident Δ"      # single series (delta)
+            nat_co["metric"]   = "coincident_reduction_mw"
+            nat = pd.concat([nat, nat_co], ignore_index=True, sort=False)
+
     if nat.empty:
         return
 
@@ -2361,5 +2374,92 @@ def table_top_states_by_percent_savings_internal(
             "adopters_active","avg_bill_wo_adopters","avg_bill_with_adopters"]
     return out[cols].sort_values("percent_savings", ascending=False).head(int(top_n)).reset_index(drop=True)
 
+def compute_state_coincident_reduction(
+    root_dir: str,
+    run_id: Optional[str] = None,
+    states: Optional[Iterable[str]] = None,
+) -> pd.DataFrame:
+    """
+    Coincident peak reduction at the *baseline* peak hour:
+      reduction = baseline_net_load(t_peak_baseline) - policy_net_load(t_peak_baseline)
+
+    Returns per-state, per-year:
+      ['state_abbr','year','coincident_reduction_mw']
+    """
+    state_dirs = discover_state_dirs(root_dir)  # existing helper
+    if states:
+        wanted = {s.strip().upper() for s in states if s and s.strip()}
+        state_dirs = [sd for sd in state_dirs if os.path.basename(sd).upper() in wanted]
+    if not state_dirs:
+        return pd.DataFrame(columns=["state_abbr","year","coincident_reduction_mw"])
+
+    rows = []
+
+    for sd in state_dirs:
+        paths = find_state_hourly_files(sd, run_id)  # existing helper
+        if not paths:
+            continue
+
+        # read all hourly rows we have for this state (both scenarios, all years)
+        frames = []
+        for pth in paths:
+            try:
+                df = pd.read_csv(pth)
+            except Exception:
+                continue
+            if "scenario" not in df.columns:
+                fn = os.path.basename(pth).lower()
+                df["scenario"] = "policy" if "policy" in fn else ("baseline" if "baseline" in fn else np.nan)
+            if "state_abbr" not in df.columns:
+                # parent-of-parent is the state when using <STATE>/<RUN_ID>/...
+                guess = os.path.basename(os.path.dirname(os.path.dirname(pth)))
+                df["state_abbr"] = str(guess).upper()
+            frames.append(df)
+
+        if not frames:
+            continue
+
+        df = pd.concat(frames, ignore_index=True)
+
+        # Need these columns
+        need = {"state_abbr", "scenario", "year", "net_sum_text"}
+        if not need.issubset(df.columns):
+            continue
+
+        # Parse arrays and coerce year
+        df["year"] = pd.to_numeric(df["year"], errors="coerce")
+        ok_mask = df["net_sum_text"].notna() & df["year"].notna() & df["scenario"].notna()
+        df = df[ok_mask].copy()
+
+        # Build {year: {scenario: array}}
+        by_year = {}
+        for r in df.itertuples(index=False):
+            arr = _parse_array_text_to_floats(getattr(r, "net_sum_text", ""))  # existing parser
+            if not arr:
+                continue
+            y = int(getattr(r, "year"))
+            scen = str(getattr(r, "scenario")).lower().strip()
+            if scen not in {"baseline", "policy"}:
+                continue
+            by_year.setdefault(y, {}).setdefault(scen, arr)
+
+        state = os.path.basename(sd).upper()
+        for y, d in by_year.items():
+            if "baseline" not in d or "policy" not in d:
+                continue
+            base = d["baseline"]
+            pol  = d["policy"]
+            if not base or not pol:
+                continue
+            # find baseline peak hour index
+            idx = int(np.argmax(base))
+            if idx < len(pol):
+                reduction = float(base[idx]) - float(pol[idx])
+                rows.append((state, y, reduction))
+
+    out = pd.DataFrame(rows, columns=["state_abbr","year","coincident_reduction_mw"])
+    # Keep nonnegative if you want to interpret “reduction” strictly (optional):
+    # out["coincident_reduction_mw"] = out["coincident_reduction_mw"].clip(lower=0.0)
+    return out.sort_values(["state_abbr","year"]).reset_index(drop=True)
 
 
