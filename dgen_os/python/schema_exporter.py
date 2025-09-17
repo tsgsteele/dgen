@@ -275,7 +275,6 @@ def export_one_schema(
                         SELECT
                         {scen} AS "scenario",
                         {sch}  AS "schema",
-                        {st}   AS "state_abbr",
                         a.rto  AS "rto",
                         a.year,
                         a.n_hours,

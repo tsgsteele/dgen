@@ -267,6 +267,128 @@ def find_state_hourly_files(state_dir: str, run_id: Optional[str] = None) -> Lis
             seen.add(p); out.append(p)
     return out
 
+def find_state_rto_hourly_files(state_dir: str, run_id: Optional[str] = None) -> List[str]:
+    """
+    Locate per-state RTO hourly CSVs written by schema_exporter:
+      <STATE>/<RUN_ID>/baseline_rto_hourly.csv
+      <STATE>/<RUN_ID>/policy_rto_hourly.csv
+    Falls back to any '*rto_hourly*.csv' if exact names aren’t found.
+    """
+    paths: List[str] = []
+    if run_id:
+        sub = os.path.join(state_dir, str(run_id))
+        if os.path.isdir(sub):
+            c1 = os.path.join(sub, "baseline_rto_hourly.csv")
+            c2 = os.path.join(sub, "policy_rto_hourly.csv")
+            if os.path.exists(c1): paths.append(c1)
+            if os.path.exists(c2): paths.append(c2)
+            if not paths:
+                paths += glob.glob(os.path.join(sub, "*rto_hourly*.csv"))
+    if not paths:
+        paths += glob.glob(os.path.join(state_dir, "*rto_hourly*.csv"))
+    # de-dup while preserving order
+    seen, out = set(), []
+    for p in paths:
+        if p not in seen:
+            seen.add(p); out.append(p)
+    return out
+
+
+def compute_rto_coincident_reduction(
+    root_dir: str,
+    run_id: Optional[str] = None,
+    states: Optional[Iterable[str]] = None,
+) -> pd.DataFrame:
+    """
+    For each YEAR and each RTO:
+      1) Sum hourly net load across ALL states contributing to that RTO (baseline, policy separately).
+      2) Find the *baseline* peak hour index for that RTO in that year.
+      3) Compute reduction at that same hour: baseline_sum[idx] - policy_sum[idx].
+    Then SUM across all RTOs to a national coincident reduction series.
+
+    Returns: ['year','coincident_reduction_mw']  (national total by summing all RTOs)
+    """
+    state_dirs = discover_state_dirs(root_dir)
+    if states:
+        wanted = {s.strip().upper() for s in states if s and s.strip()}
+        state_dirs = [sd for sd in state_dirs if os.path.basename(sd).upper() in wanted]
+    if not state_dirs:
+        return pd.DataFrame(columns=["year","coincident_reduction_mw"])
+
+    # Collect all rows from all states
+    frames: List[pd.DataFrame] = []
+    for sd in state_dirs:
+        for pth in find_state_rto_hourly_files(sd, run_id=run_id):
+            if not os.path.exists(pth) or os.path.getsize(pth) == 0:
+                print("path not found")
+                continue
+            try:
+                df = pd.read_csv(pth, usecols=["scenario","rto","year","net_sum_text"])
+            except Exception:
+                continue
+            if "scenario" not in df.columns:
+                fn = os.path.basename(pth).lower()
+                df["scenario"] = "policy" if "policy" in fn else ("baseline" if "baseline" in fn else np.nan)
+            frames.append(df)
+
+    if not frames:
+        return pd.DataFrame(columns=["year","coincident_reduction_mw"])
+
+    x = pd.concat(frames, ignore_index=True)
+    x = x.dropna(subset=["scenario","rto","year","net_sum_text"]).copy()
+    x["scenario"] = x["scenario"].astype(str).str.lower().str.strip()
+    x["rto"] = x["rto"].astype(str)
+    x["year"] = pd.to_numeric(x["year"], errors="coerce")
+    x = x[x["scenario"].isin(["baseline","policy"]) & x["year"].notna()]
+
+    # Parse arrays
+    x["arr"] = x["net_sum_text"].apply(lambda s: _parse_array_text_to_floats(str(s)))
+    x = x[x["arr"].apply(lambda a: isinstance(a, list) and len(a) > 0)]
+
+    # Sum across states -> RTO × scenario × year series
+    # (pad unequal lengths just in case, though they should match)
+    def _sum_arrays(arrs: List[List[float]]) -> List[float]:
+        L = max(len(a) for a in arrs)
+        out = np.zeros(L, dtype=float)
+        for a in arrs:
+            if len(a) == L:
+                out += np.array(a, dtype=float)
+            else:
+                b = np.zeros(L, dtype=float)
+                b[:len(a)] = np.array(a, dtype=float)
+                out += b
+        return out.tolist()
+
+    rto_sums = (
+        x.groupby(["rto","scenario","year"], observed=True)["arr"]
+         .apply(lambda s: _sum_arrays(list(s.values)))
+         .reset_index()
+    )
+
+    # For each RTO×year, compute coincident reduction at baseline peak hour
+    rows = []
+    for (rto, y), g in rto_sums.groupby(["rto","year"], observed=True):
+        g = {r["scenario"]: r["arr"] for _, r in g.iterrows()}
+        if "baseline" not in g or "policy" not in g:
+            continue
+        base, pol = g["baseline"], g["policy"]
+        if not base or not pol:
+            continue
+        idx = int(np.argmax(base))
+        if idx < len(pol):
+            red = float(base[idx]) - float(pol[idx])
+            rows.append((str(rto), int(y), red))
+
+    if not rows:
+        return pd.DataFrame(columns=["year","coincident_reduction_mw"])
+
+    rto_co = pd.DataFrame(rows, columns=["rto","year","coincident_reduction_mw"])
+
+    # National = sum across RTOs
+    nat = (rto_co.groupby("year", as_index=False)["coincident_reduction_mw"].sum())
+    return nat.sort_values("year").reset_index(drop=True)
+
+
 
 def load_state_peaks_df(state_dir: str, run_id: Optional[str] = None) -> pd.DataFrame:
     paths = find_state_hourly_files(state_dir, run_id)
@@ -952,7 +1074,14 @@ def _read_with_selected_cols(path: str) -> pd.DataFrame:
 
 
 def _process_one_state(args) -> Dict[str, pd.DataFrame]:
-    state_dir, run_id, cfg = args
+    state_dir, run_id, cfg_payload = args
+
+    # Rebuild SavingsConfig from a small, pickle-safe payload
+    if isinstance(cfg_payload, dict):
+        cfg = SavingsConfig(
+            lifetime_years=int(cfg_payload.get("lifetime_years", 25)),
+            cap_to_horizon=bool(cfg_payload.get("cap_to_horizon", False)),
+        )
     df = pd.DataFrame(columns=NEEDED_COLS)
     b_csv, p_csv = find_state_files(state_dir, run_id)
     parts: List[pd.DataFrame] = []
@@ -981,7 +1110,7 @@ def _process_one_state(args) -> Dict[str, pd.DataFrame]:
 def process_all_states(
     root_dir: str,
     run_id: Optional[str] = None,
-    cfg: SavingsConfig = SavingsConfig(),
+    cfg: Optional[SavingsConfig] = None,
     n_jobs: int = 1,
     states: Optional[Iterable[str]] = None,
 ) -> Dict[str, pd.DataFrame]:
@@ -1002,7 +1131,17 @@ def process_all_states(
             "market_share_reached": pd.DataFrame(),
         }
 
-    tasks = [(sd, run_id, cfg) for sd in state_dirs]
+    # Ensure we have a fresh instance locally (don’t default-construct in signature)
+    if cfg is None:
+        cfg = SavingsConfig()
+
+    # Ship only primitives to workers (pickle-safe)
+    cfg_payload = {
+        "lifetime_years": int(getattr(cfg, "lifetime_years", 25) or 25),
+        "cap_to_horizon": bool(getattr(cfg, "cap_to_horizon", False)),
+    }
+
+    tasks = [(sd, run_id, cfg_payload) for sd in state_dirs]
     outputs: List[Dict[str, pd.DataFrame]] = []
 
     n_jobs = max(1, min(n_jobs, max(1, (cpu_count() or 2) - 1)))
@@ -1282,7 +1421,7 @@ def facet_lines_national_totals(
     nat = build_national_totals(outputs, peaks_df=peaks_df)
 
     if coincident_df is not None and isinstance(coincident_df, pd.DataFrame) and not coincident_df.empty:
-        need = {"state_abbr","year","coincident_reduction_mw"}
+        need = {"year","coincident_reduction_mw"}
         if need.issubset(coincident_df.columns):
             nat_co = (
                 coincident_df.groupby("year", as_index=False)["coincident_reduction_mw"].sum()
@@ -1726,7 +1865,7 @@ def plot_us_cum_adopters_grouped(outputs: Dict[str, pd.DataFrame],
 
     # Map scenario labels to custom names
     rename_map = {
-        "baseline": "Status Quo",
+        "baseline": "Business-as-usual",
         "policy": "$1/Watt"
     }
     d["scenario"] = d["scenario"].map(rename_map).fillna(d["scenario"])
@@ -1738,7 +1877,7 @@ def plot_us_cum_adopters_grouped(outputs: Dict[str, pd.DataFrame],
         data=d, x="year", y="value", hue="scenario",
         errorbar=None, palette=["#a2e0fc", "#1bb3ef"]
     )
-    ax.set_title("Solar Adoption - Status Quo vs. $1/Watt")
+    ax.set_title("Solar Adoption - Business-as-usual vs. $1/Watt")
     ax.set_xlabel("")
     ax.set_ylabel("Solar Installations (millions)")
 
@@ -2459,7 +2598,95 @@ def compute_state_coincident_reduction(
 
     out = pd.DataFrame(rows, columns=["state_abbr","year","coincident_reduction_mw"])
     # Keep nonnegative if you want to interpret “reduction” strictly (optional):
-    # out["coincident_reduction_mw"] = out["coincident_reduction_mw"].clip(lower=0.0)
+    out["coincident_reduction_mw"] = out["coincident_reduction_mw"].clip(lower=0.0)
+    out["coincident_reduction_gw"] = out["coincident_reduction_mw"]/1000
     return out.sort_values(["state_abbr","year"]).reset_index(drop=True)
 
+def choropleth_state_coincident_reduction(
+    root_dir: str,
+    shapefile_path: str,
+    run_id: str | None = None,
+    year: int = 2040,
+    k_bins: int = 9,  # Jenks classes (similar to your installations map)
+    states: Optional[Iterable[str]] = None,
+) -> "pd.DataFrame":
+    """
+    Choropleth of state-level coincident peak reduction (MW) in `year`.
+
+    Uses compute_state_coincident_reduction(...) to build:
+        ['state_abbr','year','coincident_reduction_mw']
+
+    Returns the tidy DataFrame used to plot.
+    """
+    # 1) Build per-state coincident reductions
+    co = compute_state_coincident_reduction(
+        root_dir=root_dir,
+        run_id=run_id,
+        states=states
+    )
+    if co.empty:
+        raise ValueError("No coincident reduction rows found; ensure hourly CSVs exist for baseline/policy.")
+
+    d = co.copy()
+    d["year"] = pd.to_numeric(d["year"], errors="coerce")
+    d = d[(d["year"] == year) & d["state_abbr"].notna()].copy()
+    if d.empty:
+        raise ValueError(f"No coincident reduction rows found for year {year}.")
+
+    d["state_abbr"] = d["state_abbr"].astype(str).str.upper()
+    # Keep column name stable for plotting/join
+    d = d[["state_abbr", "coincident_reduction_gw"]].copy()
+
+    # 2) Load shapefile and prep join key (same pattern as your other maps)
+    gdf = gpd.read_file(shapefile_path).to_crs("EPSG:5070")
+    if "STUSPS" not in gdf.columns:
+        for c in ("stusps", "STATE_ABBR", "STATE", "STATEFP", "STATEFP20"):
+            if c in gdf.columns:
+                gdf["STUSPS"] = gdf[c].astype(str).str.upper()
+                break
+    if "STUSPS" not in gdf.columns:
+        raise ValueError("Shapefile must include a two-letter state code (e.g., STUSPS).")
+
+    gdf["STUSPS"] = gdf["STUSPS"].astype(str).str.upper()
+    # Contiguous U.S. only (match your existing maps)
+    gdf = gdf[~gdf["STUSPS"].isin({"AK","HI","PR","GU","VI","AS","MP","DC"})].copy()
+
+    plot_df = gdf.merge(d.rename(columns={"state_abbr": "STUSPS"}), on="STUSPS", how="left")
+
+    # 3) Jenks (Fisher–Jenks) if available; quantiles fallback
+    try:
+        import mapclassify  # noqa: F401
+        scheme = "fisher_jenks"
+        plot_kwargs_extra = dict(k=int(k_bins))
+    except Exception:
+        scheme = "quantiles"
+        plot_kwargs_extra = dict(k=int(k_bins))
+
+    # 4) Plot
+    import matplotlib.pyplot as plt
+    plt.rcParams["font.family"] = "Cabin"
+    fig, ax = plt.subplots(1, 1, figsize=(12, 7))
+    plot_df.plot(
+        column="coincident_reduction_gw",
+        cmap="Blues",
+        linewidth=0.6,
+        edgecolor="grey",
+        legend=True,
+        scheme=scheme,
+        legend_kwds={
+            "title": "Coincident Peak Reduction (GW)",
+            "ncols": 2,
+            "fmt": "{:.1f}",
+            "loc": "lower left",
+        },
+        ax=ax,
+        missing_kwds={"color": "lightgray"},
+        **plot_kwargs_extra,
+    )
+    ax.set_title(f"State-Level Coincident Peak Reduction in {year}", fontsize=14)
+    ax.axis("off")
+    plt.tight_layout()
+    plt.show()
+
+    return d.sort_values("coincident_reduction_gw", ascending=False).reset_index(drop=True)
 
