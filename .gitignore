@@ -51,7 +51,10 @@ gcloud/
 # Agent pickle files (hundreds of MB each)
 *.pkl
 # The local PostgreSQL data directory (Docker volume bind-mount)
-data/
+# data/ holds large raw downloads (see data/README.md for provenance).
+# Use data/* rather than data/ so the README can be re-included.
+data/*
+!data/README.md
 # Agent input files
 input_agents/
 # Timeslice reference file (large, static)

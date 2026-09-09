@@ -124,7 +124,7 @@ published state medians: 13 states with a sample of n>=100 use their own median,
 the national median ($3.6159/W). Battery cost stays national ($1,199.3/kWh, LBNL TTS 2024 — LBNL has
 not published a clean 2025 storage median). The anchor is a level-shift onto model year 2026; the
 forward decline keeps the NREL ATB/FY23 shape, and no inflation adjustment is applied. Built by
-`Notebooks/build_baseline_upfront_cost.ipynb` -> `data/state_upfront_cost_lbnl_2025.csv` ->
+`Notebooks/build_baseline_upfront_cost.ipynb` -> `dgen_os/input_dgen_os/input_data/state_upfront_cost_lbnl_2025.csv` ->
 `Notebooks/adjust_pv_batt_price_trajectories.ipynb`.
 
 `agent_mutation.elec.apply_pv_prices` / `apply_pv_plus_batt_prices` merge on

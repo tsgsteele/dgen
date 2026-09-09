@@ -1,0 +1,53 @@
+state,upfront_cost_per_w,source,n,lbnl_median_per_w
+AK,3.6159,national median (insufficient data),,
+AL,3.6159,national median (insufficient data),,
+AR,3.6159,national median (insufficient data),,
+AZ,3.1301,LBNL 2025 state median (n>=100),3558.0,3.1301
+CA,3.3392,LBNL 2025 state median (n>=100),23691.0,3.3392
+CO,3.6159,national median (insufficient data),,
+CT,3.2803,LBNL 2025 state median (n>=100),4080.0,3.2803
+DC,3.6159,national median (insufficient data),,
+DE,3.6159,national median (insufficient data),,
+FL,3.1414,LBNL 2025 state median (n>=100),304.0,3.1414
+GA,3.6159,national median (insufficient data),,
+HI,3.6159,national median (insufficient data),,
+IA,3.6159,national median (insufficient data),,
+ID,3.6159,national median (insufficient data),,
+IL,3.6159,national median (insufficient data),,
+IN,3.6159,national median (insufficient data),,
+KS,3.6159,national median (insufficient data),,
+KY,3.6159,national median (insufficient data),,
+LA,3.6159,national median (insufficient data),,
+MA,3.6159,national median (insufficient data),26.0,3.3674
+MD,3.6159,national median (insufficient data),29.0,3.9524
+ME,3.6159,national median (insufficient data),,
+MI,3.6159,national median (insufficient data),,
+MN,3.6159,national median (insufficient data),,
+MO,3.6159,national median (insufficient data),,
+MS,3.6159,national median (insufficient data),,
+MT,3.6159,national median (insufficient data),,
+NC,4.0961,LBNL 2025 state median (n>=100),4169.0,4.0961
+ND,3.6159,national median (insufficient data),,
+NE,3.6159,national median (insufficient data),,
+NH,3.6159,national median (insufficient data),43.0,3.651
+NJ,3.7435,LBNL 2025 state median (n>=100),6603.0,3.7435
+NM,4.141,LBNL 2025 state median (n>=100),1682.0,4.141
+NV,3.6159,national median (insufficient data),,
+NY,3.8746,LBNL 2025 state median (n>=100),9031.0,3.8746
+National,3.6159,LBNL 2025 national median,61712.0,3.6159
+OH,3.6159,national median (insufficient data),,
+OK,3.6159,national median (insufficient data),,
+OR,3.3782,LBNL 2025 state median (n>=100),2826.0,3.3782
+PA,3.6159,national median (insufficient data),,
+RI,3.5133,LBNL 2025 state median (n>=100),215.0,3.5133
+SC,3.6159,national median (insufficient data),,
+SD,3.6159,national median (insufficient data),,
+TN,3.6159,national median (insufficient data),,
+TX,4.0434,LBNL 2025 state median (n>=100),2673.0,4.0434
+UT,3.6159,national median (insufficient data),,
+VA,3.6159,national median (insufficient data),,
+VT,3.6159,national median (insufficient data),,
+WA,3.0389,LBNL 2025 state median (n>=100),886.0,3.0389
+WI,3.8516,LBNL 2025 state median (n>=100),1895.0,3.8516
+WV,3.6159,national median (insufficient data),,
+WY,3.6159,national median (insufficient data),,
