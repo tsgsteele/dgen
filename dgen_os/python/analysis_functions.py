@@ -379,6 +379,9 @@ def compute_portfolio_and_cumulative_savings(
     empty_cols_annual = [
         "state_abbr","scenario","year",
         "portfolio_annual_savings","portfolio_annual_net_savings",
+        "portfolio_annual_upfront_cost","portfolio_annual_upfront_cost_pv","portfolio_annual_upfront_cost_batt",
+        "portfolio_annual_financed_cost",
+        "portfolio_annual_down_payment_cost","portfolio_annual_out_of_pocket_cost",
         "lifetime_savings_total","lifetime_net_savings_total","lifetime_net_after_upfront_total",
         "median_lifetime_savings_per_adopter_to_date",
         "median_lifetime_net_savings_per_adopter_to_date",
@@ -451,12 +454,14 @@ def compute_portfolio_and_cumulative_savings(
     # ----------------------------
     contrib = []      # total energy-value savings
     contrib_net = []  # net after debt
+    contrib_debt = [] # total debt service = ongoing FINANCED cost to consumers (Synapse)
     for r in x.itertuples(index=False):
         y0 = int(r.year) if not pd.isna(r.year) else None
         if y0 is None or (r.pv_only_n <= 0 and r.pv_batt_n <= 0):
             continue
         a_only, a_batt = list(r.cf_pv_only or []), list(r.cf_pv_batt or [])
         n_only, n_batt = list(r.cf_net_pv_only or []), list(r.cf_net_pv_batt or [])
+        d_only, d_batt = list(r.cf_debt_pv_only or []), list(r.cf_debt_pv_batt or [])
         for k in range(25):
             y = y0 + k
             if cap_to_horizon and y > y_max:
@@ -465,6 +470,7 @@ def compute_portfolio_and_cumulative_savings(
                 continue
             v_total = 0.0
             v_net   = 0.0
+            v_debt  = 0.0
             if k < len(a_only) and r.pv_only_n > 0:
                 v_total += a_only[k] * r.pv_only_n
             if k < len(a_batt) and r.pv_batt_n > 0:
@@ -473,10 +479,16 @@ def compute_portfolio_and_cumulative_savings(
                 v_net   += n_only[k] * r.pv_only_n
             if k < len(n_batt) and r.pv_batt_n > 0:
                 v_net   += n_batt[k] * r.pv_batt_n
+            if k < len(d_only) and r.pv_only_n > 0:
+                v_debt  += d_only[k] * r.pv_only_n
+            if k < len(d_batt) and r.pv_batt_n > 0:
+                v_debt  += d_batt[k] * r.pv_batt_n
             if v_total != 0.0:
                 contrib.append((r.state_abbr, r.scenario, y, v_total))
             if v_net != 0.0:
                 contrib_net.append((r.state_abbr, r.scenario, y, v_net))
+            if v_debt != 0.0:
+                contrib_debt.append((r.state_abbr, r.scenario, y, v_debt))
 
     annual = (
         pd.DataFrame(contrib, columns=["state_abbr","scenario","year","portfolio_annual_savings"])
@@ -486,12 +498,19 @@ def compute_portfolio_and_cumulative_savings(
         pd.DataFrame(contrib_net, columns=["state_abbr","scenario","year","portfolio_annual_net_savings"])
           .groupby(["state_abbr","scenario","year"], as_index=False)["portfolio_annual_net_savings"].sum()
     ) if contrib_net else pd.DataFrame(columns=["state_abbr","scenario","year","portfolio_annual_net_savings"])
+    # Ongoing FINANCED cost to consumers = annual debt service, rolled forward by calendar year.
+    annual_debt = (
+        pd.DataFrame(contrib_debt, columns=["state_abbr","scenario","year","portfolio_annual_financed_cost"])
+          .groupby(["state_abbr","scenario","year"], as_index=False)["portfolio_annual_financed_cost"].sum()
+    ) if contrib_debt else pd.DataFrame(columns=["state_abbr","scenario","year","portfolio_annual_financed_cost"])
 
     if not annual.empty or not annual_net.empty:
         annual = (annual.merge(annual_net, on=["state_abbr","scenario","year"], how="outer")
+                        .merge(annual_debt, on=["state_abbr","scenario","year"], how="outer")
                         .fillna(0.0))
         annual["portfolio_annual_savings"] = pd.to_numeric(annual["portfolio_annual_savings"], errors="coerce").fillna(0.0)
         annual["portfolio_annual_net_savings"] = pd.to_numeric(annual["portfolio_annual_net_savings"], errors="coerce").fillna(0.0)
+        annual["portfolio_annual_financed_cost"] = pd.to_numeric(annual["portfolio_annual_financed_cost"], errors="coerce").fillna(0.0)
 
     # ----------------------------
     # (2) Lifetime totals per state/scenario (total, net, and net-after-upfront)
@@ -502,6 +521,8 @@ def compute_portfolio_and_cumulative_savings(
     cohort_rows_life_total = []
     cohort_rows_life_net   = []
     cohort_rows_cost       = []
+    upfront_annual_rows    = []   # GROSS upfront deployment cost by install-year (Synapse: jobs)
+    down_payment_annual_rows = []  # 30% cash down payment by install-year (Synapse: out-of-pocket stream)
 
     # Ensure numeric inputs for PV + Battery capex components
     x["system_capex_per_kw_combined"]   = pd.to_numeric(x.get("system_capex_per_kw_combined", np.nan), errors="coerce")
@@ -510,6 +531,11 @@ def compute_portfolio_and_cumulative_savings(
     x["batt_kwh"]                       = pd.to_numeric(x.get("batt_kwh", np.nan), errors="coerce")
 
     CASH_FRACTION = 0.30  # subtract only the 30% cash/down-payment portion
+
+    # Customer out-of-pocket down payment fraction (Synapse: stream 2, out-of-pocket cost).
+    # Source: diffusion_shared.financing_atb_FY23.down_payment_fraction = 0.7 (debt) =>
+    # SAM loan.FinancialParameters.debt_fraction = 70 => remaining 30% is cash paid at install.
+    DOWN_PAYMENT_FRACTION = 0.30
 
     for r in x.itertuples(index=False):
         y0 = int(r.year) if not pd.isna(r.year) else None
@@ -547,6 +573,18 @@ def compute_portfolio_and_cumulative_savings(
 
         if np.isfinite(per_adopter_upfront_cash) and (r.cohort_n > 0) and (per_adopter_upfront_cash > 0.0):
             cohort_rows_cost.append((r.state_abbr, r.scenario, y0, float(r.cohort_n), per_adopter_upfront_cash))
+
+        # ----- GROSS upfront deployment cost this install-year (Synapse jobs input) -----
+        # Full installed capex (NOT net of ITC / cash): all adopters get PV; only battery
+        # adopters add battery. One-time in the install year (not rolled forward).
+        up_pv   = pv_upfront   * float(r.cohort_n)   if r.cohort_n   > 0 else 0.0
+        up_batt = batt_upfront * float(r.pv_batt_n)  if r.pv_batt_n  > 0 else 0.0
+        if (up_pv + up_batt) > 0.0:
+            upfront_annual_rows.append((r.state_abbr, r.scenario, y0, up_pv, up_batt))
+            # ----- Customer out-of-pocket down payment (Synapse stream 2), booked in install year -----
+            down_payment_annual_rows.append(
+                (r.state_abbr, r.scenario, y0, DOWN_PAYMENT_FRACTION * (up_pv + up_batt))
+            )
 
         # For medians (unchanged)
         if r.pv_only_n > 0:
@@ -731,9 +769,33 @@ def compute_portfolio_and_cumulative_savings(
             annual    = annual.merge(df_med_this, on=["state_abbr","scenario","year"], how="left") if not annual.empty else annual
             cumulative= cumulative.merge(df_med_this, on=["state_abbr","scenario","year"], how="left") if not cumulative.empty else cumulative
 
+    # Annual GROSS upfront deployment cost (Synapse jobs input): total + PV/battery split, by install-year.
+    if upfront_annual_rows and not annual.empty:
+        upfront_annual = (
+            pd.DataFrame(upfront_annual_rows, columns=["state_abbr","scenario","year",
+                          "portfolio_annual_upfront_cost_pv","portfolio_annual_upfront_cost_batt"])
+              .groupby(["state_abbr","scenario","year"], as_index=False).sum()
+        )
+        upfront_annual["portfolio_annual_upfront_cost"] = (
+            upfront_annual["portfolio_annual_upfront_cost_pv"] + upfront_annual["portfolio_annual_upfront_cost_batt"]
+        )
+        annual = annual.merge(upfront_annual, on=["state_abbr","scenario","year"], how="left")
+
+    # Annual customer out-of-pocket down payment (Synapse stream 2), by install-year.
+    if down_payment_annual_rows and not annual.empty:
+        down_payment_annual = (
+            pd.DataFrame(down_payment_annual_rows, columns=["state_abbr","scenario","year",
+                          "portfolio_annual_down_payment_cost"])
+              .groupby(["state_abbr","scenario","year"], as_index=False)["portfolio_annual_down_payment_cost"].sum()
+        )
+        annual = annual.merge(down_payment_annual, on=["state_abbr","scenario","year"], how="left")
+
     # Ensure numeric and no NaNs
     num_cols = [
         "portfolio_annual_savings","portfolio_annual_net_savings",
+        "portfolio_annual_financed_cost",
+        "portfolio_annual_upfront_cost","portfolio_annual_upfront_cost_pv","portfolio_annual_upfront_cost_batt",
+        "portfolio_annual_down_payment_cost",
         "cumulative_bill_savings","cumulative_net_savings",
         "lifetime_savings_total","lifetime_net_savings_total","lifetime_net_after_upfront_total",
         "median_lifetime_savings_per_adopter_to_date",
@@ -748,6 +810,17 @@ def compute_portfolio_and_cumulative_savings(
             annual[col] = pd.to_numeric(annual[col], errors="coerce").fillna(0.0)
         if col in cumulative.columns:
             cumulative[col] = pd.to_numeric(cumulative[col], errors="coerce").fillna(0.0)
+
+    # Headline Synapse column: customer out-of-pocket cost = down payment (install year) +
+    # financed loan payments (every year the loan is outstanding). Computed AFTER both
+    # components are aggregated by (state_abbr, scenario, year) and NaN-coerced above, so a
+    # year with both a new cohort's down payment and older cohorts' debt service sums both.
+    if not annual.empty:
+        down_payment_col = annual["portfolio_annual_down_payment_cost"] if "portfolio_annual_down_payment_cost" in annual.columns else 0.0
+        financed_col = annual["portfolio_annual_financed_cost"] if "portfolio_annual_financed_cost" in annual.columns else 0.0
+        if "portfolio_annual_down_payment_cost" not in annual.columns:
+            annual["portfolio_annual_down_payment_cost"] = 0.0
+        annual["portfolio_annual_out_of_pocket_cost"] = down_payment_col + financed_col
 
     for col in ["lifetime_savings_total","lifetime_net_savings_total","lifetime_net_after_upfront_total"]:
         if col in lifetime.columns:
@@ -823,11 +896,20 @@ def aggregate_state_metrics(agents: pd.DataFrame, cfg: SavingsConfig) -> Dict[st
     else:
         median_storage = pd.DataFrame(columns=["state_abbr","year","scenario","median_batt_kwh"])
 
+    # New battery storage added this year (energy, kWh) = battery adopters x per-system battery size.
+    # Mirrors solar's new_system_kw. Defensive .get so a missing battery column can't hard-fail.
+    x["new_batt_kwh"] = (
+        pd.to_numeric(x.get("batt_adopters_added_this_year", 0.0), errors="coerce").fillna(0.0)
+        * pd.to_numeric(x.get("batt_kwh", 0.0), errors="coerce").fillna(0.0)
+    )
+
     # Totals
     totals = (
         x.groupby(["state_abbr","year","scenario"], observed=True)
          .agg(new_adopters=("new_adopters","sum"),
               new_system_kw=("new_system_kw","sum"),
+              new_batt_adopters=("batt_adopters_added_this_year","sum"),
+              new_batt_kwh=("new_batt_kwh","sum"),
               number_of_adopters=("number_of_adopters","sum"),
               system_kw_cum=("system_kw_cum","sum"),
               batt_kwh_cum=("batt_kwh_cum","sum"))
@@ -1264,6 +1346,14 @@ def build_national_totals(
             s["metric"] = col
             pieces.append(s)
 
+    # Annual new battery adopters / capacity — NEW (optional)
+    for col in ("new_batt_adopters", "new_batt_kwh"):
+        if col in totals.columns:
+            s = _sum_metric(totals[["state_abbr","year","scenario",col]].copy(), col, cumulative=False)
+            if not s.empty:
+                s["metric"] = col
+                pieces.append(s)
+
     # Annual portfolio bill savings (total) — existing
     if "portfolio_annual_savings" in outputs.get("portfolio_annual_savings", pd.DataFrame()).columns or \
        "portfolio_annual_savings" in (outputs.get("portfolio_annual_savings", pd.DataFrame()).columns if "portfolio_annual_savings" in outputs else []):
@@ -1283,6 +1373,17 @@ def build_national_totals(
         if not s.empty:
             s["metric"] = "portfolio_annual_net_savings"
             pieces.append(s)
+
+    # Annual portfolio upfront/financed costs — NEW (optional)
+    for col in ("portfolio_annual_upfront_cost", "portfolio_annual_upfront_cost_pv",
+                "portfolio_annual_upfront_cost_batt", "portfolio_annual_financed_cost",
+                "portfolio_annual_down_payment_cost", "portfolio_annual_out_of_pocket_cost"):
+        if col in outputs.get("portfolio_annual_savings", pd.DataFrame()).columns:
+            pac = outputs["portfolio_annual_savings"]
+            s = _sum_metric(pac[["state_abbr","year","scenario",col]].copy(), col, cumulative=False)
+            if not s.empty:
+                s["metric"] = col
+                pieces.append(s)
 
     # Cumulative bill savings (total) — existing
     if "cumulative_bill_savings" in outputs.get("cumulative_bill_savings", pd.DataFrame()).columns:
