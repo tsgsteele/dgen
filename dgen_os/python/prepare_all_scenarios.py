@@ -35,6 +35,12 @@ def main():
         "--end-year", type=int, required=True,
         help="Last year of model run (e.g. 2030 or 2050)"
     )
+    parser.add_argument(
+        "--tag", default="",
+        help="Optional run tag inserted into the scenario filename after the state "
+             "(e.g. 'srec' -> baseline_nj_srec_2040.xlsm -> "
+             "diffusion_results_baseline_nj_srec_2040_<ts>). Keeps runs self-identifying."
+    )
     args = parser.parse_args()
 
     # Read list of (abbr, fullname) pairs
@@ -47,12 +53,13 @@ def main():
             abbr, fullname = line.split(",", 1)
             states.append((abbr.strip(), fullname.strip()))
 
+    tag = f"_{args.tag}" if args.tag else ""
     for abbr, fullname in states:
         for scenario in ("baseline", "policy"):
             tpl = os.path.join(args.templates_dir, f"{scenario}.xlsm")
             out = os.path.join(
                 args.output_dir,
-                f"{scenario}_{abbr}_{args.end_year}.xlsm"
+                f"{scenario}_{abbr}{tag}_{args.end_year}.xlsm"
             )
             print(f"[{datetime.now()}] Preparing {out} for {fullname}")
             prepare(

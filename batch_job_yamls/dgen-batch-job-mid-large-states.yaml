@@ -2,8 +2,8 @@ logsPolicy:
   destination: CLOUD_LOGGING
 
 taskGroups:
-  - taskCount: "12"               # one task per state
-    parallelism: "5"             # run all states in parallel
+  - taskCount: "3"               # one task per state
+    parallelism: "3"             # run all states in parallel
     schedulingPolicy: AS_SOON_AS_POSSIBLE
 
     taskSpec:
@@ -45,7 +45,7 @@ taskGroups:
 
               # 1b) Fetch agent file
               python /opt/dgen_os/python/fetch_files.py dgen-assets \
-                input_agents/agent_df_base_res_national_updated_wholesale_prices.pkl \
+                input_agents/agent_df_base_res_national_updated_tariffs_2026.pkl \
                 /opt/dgen_os/input_agents/agent_df_base_res_national_updated_wholesale_prices.pkl
 
               # 2) Pick *this* task’s state

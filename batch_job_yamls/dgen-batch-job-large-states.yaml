@@ -2,8 +2,8 @@ logsPolicy:
   destination: CLOUD_LOGGING
 
 taskGroups:
-  - taskCount: "4"               # one task per state
-    parallelism: "4"             # run all states in parallel
+  - taskCount: "2"               # one task per state
+    parallelism: "2"             # run all states in parallel
     schedulingPolicy: AS_SOON_AS_POSSIBLE
 
     taskSpec:
@@ -23,6 +23,9 @@ taskGroups:
             user=postgres
             password=postgres
           LOCAL_CORES: "32"
+          # Set to "agent_df_base_res_national_updated_tariffs_2026.pkl" to use updated tariffs
+          # Set to "agent_df_base_res_national_updated_wholesale_prices.pkl" for original
+          AGENT_FILE: "agent_df_base_res_national_updated_tariffs_2026.pkl"
 
 
       runnables:
@@ -44,9 +47,9 @@ taskGroups:
               python /opt/dgen_os/python/fetch_files.py dgen-assets input_scenarios/policy.xlsm   /opt/dgen_os/input_scenarios/policy.xlsm
               python /opt/dgen_os/python/fetch_files.py dgen-assets large_states_test.csv                /tmp/large_states_test.csv
 
-              # 1b) Fetch agent file
+              # 1b) Fetch agent file (controlled by AGENT_FILE env var)
               python /opt/dgen_os/python/fetch_files.py dgen-assets \
-                input_agents/agent_df_base_res_national_updated_wholesale_prices.pkl \
+                input_agents/${AGENT_FILE} \
                 /opt/dgen_os/input_agents/agent_df_base_res_national_updated_wholesale_prices.pkl
 
               # 2) Pick *this* task’s state

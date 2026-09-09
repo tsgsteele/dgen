@@ -6,5 +6,5 @@ docker buildx build --platform linux/amd64 --no-cache \
   -t us-east1-docker.pkg.dev/dgen-466702/dgen-repo-east1/dgen:latest \
   --push .
 
-# Submit job
-./submit_one.sh
+# Submit national run (all 48 states)
+./submit_all.sh
