@@ -15,6 +15,7 @@ from scipy import optimize
 import settings
 import utility_functions as utilfunc
 import agent_mutation
+import config
 
 # ---- helper imports (kept local so you can drop-in without changing file imports)
 from batt_dispatch_helpers import (
@@ -216,7 +217,7 @@ def calc_system_performance(
             system_costs = costs['system_capex_per_kw_combined'] * kw
 
         #loan.SystemCosts.om_production1_values = batt.Outputs.batt_annual_discharge_energy
-        batt_costs = costs['batt_capex_per_kwh_combined'] * batt.Outputs.batt_bank_installed_capacity * .7 # For the investment tax credit
+        batt_costs = costs['batt_capex_per_kwh_combined'] * batt.Outputs.batt_bank_installed_capacity
         value_of_resiliency = agent.loc['value_of_resiliency_usd']
 
     else:
@@ -281,27 +282,23 @@ def calc_system_performance(
     sales_tax = 0.0
     loan.SystemCosts.total_installed_cost = direct_costs + sales_tax + one_time_charge
 
-    # # --- Override ITC logic by scenario and year ---
-    # scen = str(agent.get("scenario", "")).lower()
-    # year = int(agent.get("year", 0))
+    # Federal residential ITC removed (post-HR1): no tax credit applied to PV or battery.
+    loan.TaxCreditIncentives.itc_fed_percent = [0]
 
-    # if scen == "baseline":
-    #     # Apply fixed step-down ITC for baseline
-    #     if year <= 2032:
-    #         itc_percent = 30.0
-    #     elif year == 2033:
-    #         itc_percent = 26.0
-    #     elif year == 2034:
-    #         itc_percent = 22.0
-    #     else:
-    #         itc_percent = 0.0
-    # else:
-    #     # For policy and any other scenario, use the agent-specific ITC
-    #     itc_percent = agent.get("itc_fraction_of_capex", 0) * 100
-
-    itc_percent = agent.get("itc_fraction_of_capex", 0) * 100
-    loan.TaxCreditIncentives.itc_fed_percent = [itc_percent]
-
+    # --- State production-based incentive (e.g. NJ SREC) via SAM's native PBI ---
+    # Flat $/kWh paid on system production for `term_yrs` years. SAM multiplies the
+    # rate by the system's own (degraded) annual generation internally, so no
+    # production array is hand-rolled here. Untaxed per the study's modeling choice
+    # (pbi tax flags = 0). Config/env-gated by state_abbr; empty dict = off.
+    _pbi = config.PRODUCTION_INCENTIVES.get(str(agent.get('state_abbr', '')).upper())
+    if _pbi:
+        _usd_per_kwh = _pbi['usd_per_mwh'] / 1000.0
+        _term        = int(_pbi['term_yrs'])
+        loan.PaymentIncentives.pbi_sta_amount  = [_usd_per_kwh] * _term
+        loan.PaymentIncentives.pbi_sta_term    = _term
+        loan.PaymentIncentives.pbi_sta_escal   = 0.0   # flat nominal ($76.50/MWh for NJ)
+        loan.PaymentIncentives.pbi_sta_tax_fed = 0     # untaxed (modeling choice)
+        loan.PaymentIncentives.pbi_sta_tax_sta = 0
 
     loan.execute()
     return -loan.Outputs.npv
@@ -973,6 +970,13 @@ def _harmonize_tier_caps_and_units(ec_tou_mat: List[List[float]]) -> List[List[f
         finite_caps = caps_t[(caps_t > 0) & (caps_t < BIG_THRESH)]
         cap = float(np.min(finite_caps)) if finite_caps.size else float(BIG)
         tou[rows_t, 2] = cap
+
+    # The highest-numbered tier must be unlimited so PySAM never hits
+    # "cumulative energy exceeds maximum usage for all tiers".  Tariff sources
+    # sometimes store a finite cap on the last tier (e.g. CA baseline kWh
+    # allowances) that would otherwise be propagated here.
+    last_tier = int(tiers.max())
+    tou[tou[:, 1].astype(int) == last_tier, 2] = float(BIG)
 
     # Normalize unit codes
     tou[:, 3] = float(unit_code_mode)
