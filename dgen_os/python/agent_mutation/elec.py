@@ -194,8 +194,27 @@ def apply_pv_prices(dataframe, pv_price_traj):
 
     dataframe = dataframe.reset_index()
 
-    # join the data
-    dataframe = pd.merge(dataframe, pv_price_traj, how='left', on=['sector_abbr', 'year'])
+    # join the data. State-specific price tables carry a 'state_abbr' column (baseline PV is
+    # anchored per state to the LBNL viz-tool cost); national tables (e.g. the policy
+    # dollar-per-watt trajectory) do not, and merge on sector/year as before.
+    merge_keys = ['state_abbr', 'sector_abbr', 'year'] if 'state_abbr' in pv_price_traj.columns \
+        else ['sector_abbr', 'year']
+    if 'state_abbr' not in pv_price_traj.columns:
+        logger.warning(
+            'PV price table has NO state_abbr column: a single national price will be applied to '
+            'every state. This is expected for national/policy dollar-per-watt trajectories, but '
+            'for a baseline run it means the per-state LBNL costs are NOT being used (the local '
+            'non-cloud read path in data_functions.get_technology_costs_solar drops state_abbr).'
+        )
+    dataframe = pd.merge(dataframe, pv_price_traj, how='left', on=merge_keys)
+    _no_price = dataframe['system_capex_per_kw'].isna()
+    if _no_price.any():
+        logger.warning(
+            'PV price merge left {} agents with no system_capex_per_kw (states: {}). Check that '
+            'the price table covers every state/sector/year being modeled.'.format(
+                int(_no_price.sum()), sorted(dataframe.loc[_no_price, 'state_abbr'].unique().tolist())
+            )
+        )
 
     # apply the capital cost multipliers
     #dataframe['system_capex_per_kw'] = (dataframe['system_capex_per_kw'] * dataframe['cap_cost_multiplier'])
@@ -274,13 +293,33 @@ def apply_pv_plus_batt_prices(dataframe, pv_plus_batt_price_traj, batt_tech_traj
                               'batt_om_per_kw':'batt_om_per_kw_combined',
                               'batt_om_per_kwh':'batt_om_per_kwh_combined'}, inplace=True)
 
-    # Merge on prices
-    dataframe = pd.merge(dataframe, pv_plus_batt_price_traj[['year','sector_abbr',
-                                                             'system_capex_per_kw_combined',
-                                                             'batt_capex_per_kwh_combined','batt_capex_per_kw_combined',
-                                                             'linear_constant_combined',
-                                                             'batt_om_per_kw_combined','batt_om_per_kwh_combined']], 
-                         how = 'left', on = ['year', 'sector_abbr'])
+    # Merge on prices. system_capex_per_kw_combined is the PV portion that actually drives the
+    # cashflow (both PV-only and PV+batt system_costs in financial_functions), so a state-specific
+    # baseline table carries a 'state_abbr' column and is merged per state; national tables merge
+    # on sector/year as before. Battery/O&M columns stay national in either case.
+    key_cols = ['state_abbr', 'year', 'sector_abbr'] if 'state_abbr' in pv_plus_batt_price_traj.columns \
+        else ['year', 'sector_abbr']
+    cost_cols = ['system_capex_per_kw_combined',
+                 'batt_capex_per_kwh_combined', 'batt_capex_per_kw_combined',
+                 'linear_constant_combined',
+                 'batt_om_per_kw_combined', 'batt_om_per_kwh_combined']
+    if 'state_abbr' not in pv_plus_batt_price_traj.columns:
+        logger.warning(
+            'PV+batt price table has NO state_abbr column: a single national '
+            'system_capex_per_kw_combined will be applied to every state. Expected for '
+            'national/policy trajectories; for a baseline run it means the per-state LBNL costs '
+            'are NOT driving the economics.'
+        )
+    dataframe = pd.merge(dataframe, pv_plus_batt_price_traj[key_cols + cost_cols],
+                         how='left', on=key_cols)
+    _no_price = dataframe['system_capex_per_kw_combined'].isna()
+    if _no_price.any():
+        logger.warning(
+            'PV+batt price merge left {} agents with no system_capex_per_kw_combined (states: {}). '
+            'Check that the price table covers every state/sector/year being modeled.'.format(
+                int(_no_price.sum()), sorted(dataframe.loc[_no_price, 'state_abbr'].unique().tolist())
+            )
+        )
     
     dataframe = dataframe.set_index('agent_id')
 
