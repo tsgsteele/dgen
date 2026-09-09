@@ -197,7 +197,7 @@ States are grouped into four size classes (`small / mid / mid-large / large`) wi
 - **Cloud-native**: upstream dGen targets local Postgres; this fork runs on Cloud SQL + Cloud Batch.
 - **Dual-scenario loop**: each run produces paired `baseline` + `policy` schemas in one execution.
 - **Battery attachment**: exogenous state-level attachment rates + largest-remainder integer allocation (not in upstream).
-- **ITC modeled post-HR1**: hard-coded ITC expiry 2027; commented-out block for pre-HR1 comparison.
+- **No federal ITC**: the residential ITC is fully removed — `itc_fed_percent` is pinned to 0 in `financial_functions.py` and batteries carry full (undiscounted) capex. The `input_main_itc_options` DB plumbing still loads but is inert.
 - **PV sizing**: PV optimized once (PV-only), then PV+battery evaluated at fixed PV size.
 - **Hourly aggregates**: `state_hourly_agg` and `rto_hourly_agg` tables written per run schema.
 - **Analysis layer**: `analysis_functions.py` and `schema_exporter.py` are fork additions.

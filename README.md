@@ -118,6 +118,26 @@ The model selects PV/battery cost trajectories based on the scenario schema name
 
 **Implication:** for a standard baseline/policy pair, you usually update the *policy* tables once (national run), or create/update state-specific tables/rows for a targeted policy run (state run).
 
+**The baseline tables are state-specific.** `pv_price_baseline` and `pv_plus_batt_baseline` carry a
+`state_abbr` column (49 states x 25 years, `res` only), anchored to LBNL *Tracking the Sun* 2025
+published state medians: 13 states with a sample of n>=100 use their own median, the remaining 36 use
+the national median ($3.6159/W). Battery cost stays national ($1,199.3/kWh, LBNL TTS 2024 — LBNL has
+not published a clean 2025 storage median). The anchor is a level-shift onto model year 2026; the
+forward decline keeps the NREL ATB/FY23 shape, and no inflation adjustment is applied. Built by
+`Notebooks/build_baseline_upfront_cost.ipynb` -> `data/state_upfront_cost_lbnl_2025.csv` ->
+`Notebooks/adjust_pv_batt_price_trajectories.ipynb`.
+
+`agent_mutation.elec.apply_pv_prices` / `apply_pv_plus_batt_prices` merge on
+`['state_abbr','sector_abbr','year']` when the price table has a `state_abbr` column and fall back to
+`['sector_abbr','year']` when it does not (the policy dollar-per-watt tables are national by design).
+Both log a warning when they take the national path, and when a merge leaves any agent without a
+price — a silent collapse to one national price is otherwise invisible.
+
+**Caveat:** the non-cloud read path (`USE_PRIVATE_IP_DIRECT` unset) fetches prices via an explicit
+`SELECT` in `data_functions.get_technology_costs_solar` that does **not** include `state_abbr`, so a
+local run silently collapses to a single national price. Every Batch yaml sets
+`USE_PRIVATE_IP_DIRECT=1`, so cloud runs are unaffected.
+
 ---
 
 ## 1.4 Optimal system sizing and economics (PV-only, then PV+battery)
@@ -149,9 +169,24 @@ In the walkthrough, the sizing step was described as selecting PV to **maximize 
 
 ## 1.5 Incentives and ITC handling
 
-The ITC is modeled post-HR1, with the credit expiring in 2027. This is hard-coded in the agent pickle file, which has a year-specific column for the value of the ITC. This value is then fed to PySAM for economic calculations. 
+**There is no federal ITC in the current model.** `financial_functions.calc_system_size_and_performance`
+pins `loan.TaxCreditIncentives.itc_fed_percent = [0]` on every call, and batteries carry their full
+installed cost (an earlier `* 0.7` battery multiplier, which stood in for the ITC, has been removed).
+Both changes are unconditional — they apply to every year, state and scenario.
 
-For comparisons to a world in which HR1 was *not* passed, there is a commented-out block of code that overrides the ITC (usually drawn from the agent pickle file) and set it to sunset by 2032.
+Two things to know:
+
+- The `input_main_itc_options` table is still read (`data_functions.get_itc_incentives`) and
+  `itc_fraction_of_capex` is still merged onto agents, but nothing reads it any more. The plumbing is
+  inert; reinstating an ITC is a one-line change at the `itc_fed_percent` assignment.
+- That assignment is **load-bearing, not redundant**. `_init_pv_batt_stack` tries three named PySAM
+  configs in order, and two of them (`PVWattsBatteryResidential`, `PVBatteryResidential`) ship with a
+  30% `itc_fed_percent` default. Only `CustomGenerationBatteryResidential` defaults to 0. If the
+  explicit zero were removed and the first config ever failed to construct, a 30% ITC would silently
+  reappear.
+
+State production-based incentives are separate and unaffected — see `config.PRODUCTION_INCENTIVES`
+and the `pbi_sta_*` block in `financial_functions` (used for the NJ SREC study).
 
 ---
 
@@ -249,6 +284,45 @@ State/RTO hourly net load aggregates use the **cumulative adoption mix** to blen
 - PV-only adopter net load
 - PV+battery adopter net load
 
+### Flat attachment-rate scenarios (sensitivity runs)
+Setting the env var `FLAT_STORAGE_ATTACHMENT_RATE` (a float in `[0,1]`, read in `config.py`) overrides
+the per-state Ohm rates with one flat rate for every state, for both the baseline and policy scenario.
+`data_functions.create_output_schema` then tags the schema `_a<pct>` (e.g. `_a75`) so runs are
+self-describing in Cloud SQL. `submit_all_attach.sh <rate>` injects the variable into temp copies of
+the Batch yamls and submits the full 49-state run; the checked-in yamls are untouched.
+
+Keep that tag short — Postgres truncates identifiers at 63 bytes and the untagged schema name is
+already ~56 characters. The original `_attach<pct>` tag pushed `baseline` names to 64 and every
+schema creation failed with `IdentifierError`, while the two-characters-shorter `policy` names
+survived. `create_output_schema` now trims the microsecond suffix and raises if a name still will not
+fit.
+
+### Attachment rate does not affect PV adoption
+`calc_system_size_and_performance` computes **both** the PV-only and PV+battery economics for every
+agent and never reads `storage_attachment_rate`; the rate is consumed only by the post-diffusion
+allocation. Adoption is driven by PV-only payback. Verified empirically: the 5% and 75% runs produced
+byte-identical `new_adopters`, `new_system_kw`, `system_capex_per_kw_combined`, `payback_period`, and
+all per-agent cash-flow arrays, with battery counts differing by exactly 15.00x (= 75/5).
+
+That makes any flat rate **derivable from an existing exported run** —
+`synthesize_attachment_scenario.synthesize_rate(agents, rate)` re-runs the allocation at a new rate
+and rebuilds the battery columns, no model run required. Proven exact: re-deriving 75% from the
+exported 5% run reproduced the real 75% run's `totals` and `portfolio_annual_savings` with a maximum
+difference of 0.0000 on every column. Two traps it handles, both caught by that back-test:
+cumulatives must be seeded from each agent's pre-existing stock (`initial_batt_kwh`, which is *not* in
+`analysis_functions.AGENT_USECOLS`), and `agent_id` is not globally unique — it restarts at 0 in each
+state, so any per-agent cumsum must key on `(state_abbr, sector_abbr, agent_id)`. What it *cannot*
+derive is `peaks` / `coincident`, because those come from the hourly aggregates, which weight the
+PV-only and PV+battery load shapes by battery counts and whose per-agent hourly profiles are excluded
+from the CSV export.
+
+### Battery sizing is a fixed ratio, 2-hour duration
+Battery size is pinned to PV size in `financial_functions`, not chosen independently:
+`battery kWh = PV kW / 0.8` and `battery kW = battery kWh / 2`. Every battery is therefore a **2-hour**
+system (verified: `batt_kwh / batt_kw` = 2.000 across all agent-years, zero variance). Reported
+`batt_kwh` / `new_batt_kwh` are **installed nameplate energy capacity, not dispatched energy**.
+Typical run values: 8.76 kW PV -> 11.47 kWh / 5.74 kW battery.
+
 ---
 
 ## 1.8 Outputs written per run schema
@@ -263,13 +337,31 @@ Key tables include:
 - `state_hourly_agg`
 - `rto_hourly_agg`
 
+Schema names are additionally tagged `_a<pct>` when `FLAT_STORAGE_ATTACHMENT_RATE` is set.
+
+### Analysis-layer columns (computed on export, not stored per run)
+`analysis_functions` adds these on top of the raw tables:
+
+- `totals`: `new_batt_adopters`, `new_batt_kwh` alongside the solar `new_adopters` / `new_system_kw`.
+- `portfolio_annual_savings`: `portfolio_annual_upfront_cost` with `_pv` / `_batt` split (**gross**
+  installed capex in the install year — no tax credits, no netting of financing),
+  `portfolio_annual_down_payment_cost` (the 30% cash share; `financing_atb_FY23.down_payment_fraction`
+  = 0.7 becomes SAM's `debt_fraction = 70`), `portfolio_annual_financed_cost` (annual debt service,
+  rolled forward by calendar year), and `portfolio_annual_out_of_pocket_cost` = down payment + loan
+  payments. All six roll up into `national_totals`.
+
+Note `portfolio_annual_financed_cost` is 0 in the first model year: SAM's debt arrays are zero at
+index 0, so a 2026 install makes its first annual payment in 2027. The financed component then
+accumulates as each year adds a new cohort of 20-year loans, and never declines within a 2026-2040
+horizon because no loan matures before 2046.
+
 ---
 
 # 2. Runbook: running dGen on Google Cloud and producing results
 
 This runbook covers two workflows:
 
-- **National run (48 states)**: submit *multiple* Google Cloud Batch jobs (small/mid/mid-large/large state groups) to parallelize the national run and right-size compute per state.
+- **National run (49 states: lower 48 + DC)**: submit *multiple* Google Cloud Batch jobs (small/mid/mid-large/large state groups) to parallelize the national run and right-size compute per state.
 - **State run (single state)**: submit *one* Batch job sized appropriately for the selected state (often used for policy-specific runs like instant permitting).
 
 ---
@@ -305,7 +397,17 @@ gcloud auth configure-docker us-east1-docker.pkg.dev
 
 ---
 
-## 2.2 National run (48 states): build once, submit 4 Batch jobs
+## 2.2 National run (49 states: lower 48 + DC): build once, submit 11 Batch jobs
+
+> **Washington DC** was added to the run set in 2026-09 (`states.csv`, `small_states_r2b.csv`,
+> `DGEN_STATES` in the price-trajectory notebook, and the cost CSV where it takes the national
+> fallback). DC has only 13 agents, which exposed a deadlock: `dgen_model` split agents into
+> `LOCAL_CORES` chunks via `np.array_split`, and when a state has fewer agents than cores the empty
+> chunks made the progress callback raise inside the multiprocessing pool, killing the result handler
+> so `pool.join()` blocked forever — the task sat in RUNNING, silent, with no traceback. Chunks are
+> now capped at `min(cores, n_agents)` with empties dropped, and the callback is wrapped defensively
+> (any exception in a Pool callback deadlocks the run). All other states have >=32 agents.
+
 
 ### 2.2.1 Why the national run is split across multiple Batch jobs
 
@@ -347,7 +449,7 @@ Each Batch job has `taskCount = number_of_states_in_that_group`. Each *task*:
   - **instance connection name** (e.g., `PROJECT:REGION:INSTANCE`)
   - whether you’re connecting via **private IP** (Batch jobs) and/or **Cloud SQL Proxy** (local tools)
 
-#### Step 1 — Generate the state input CSVs (must cover all 48 states)
+#### Step 1 — Generate the state input CSVs (must cover all 49 states, incl. DC)
 
 Run the notebook:
 
