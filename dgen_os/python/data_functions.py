@@ -14,6 +14,7 @@ import subprocess
 import os
 import psutil
 import decorators
+import config
 import utility_functions as utilfunc
 import shutil
 import glob
@@ -155,7 +156,34 @@ def create_output_schema(scenario_num, pg_conn_string, role, suffix, scenario_li
     fname = os.path.basename(scenario_list[scenario_num])
     scenario_file_name, _ = os.path.splitext(fname)
 
-    dest_schema = 'diffusion_results_{}'.format( (scenario_file_name+'_'+suffix+suffix_microsecond).lower())
+    # tag the schema with the flat attachment rate when running a sensitivity scenario
+    # (e.g. _attach75), so the 5%/75%/100% runs are self-describing in the DB.
+    # NOTE: keep this tag SHORT. Postgres truncates identifiers at 63 bytes and the untagged
+    # name is already ~56 chars (e.g. diffusion_results_baseline_id_2040_20260908_135756245069),
+    # so a long tag like "_attach100" overflows and every schema creation fails.
+    attach_tag = ""
+    if getattr(config, "FLAT_STORAGE_ATTACHMENT_RATE", None) is not None:
+        attach_tag = "_a{}".format(int(round(config.FLAT_STORAGE_ATTACHMENT_RATE * 100)))
+
+    PG_MAX_IDENTIFIER = 63
+
+    def _build(micro):
+        return 'diffusion_results_{}'.format(
+            (scenario_file_name + attach_tag + '_' + suffix + micro).lower())
+
+    dest_schema = _build(suffix_microsecond)
+    if len(dest_schema) > PG_MAX_IDENTIFIER:
+        # trim the microsecond tail (least significant part) rather than mangle the name
+        overflow = len(dest_schema) - PG_MAX_IDENTIFIER
+        dest_schema = _build(suffix_microsecond[:max(0, len(suffix_microsecond) - overflow)])
+        logger.warning(
+            'Output schema name exceeded the {}-char Postgres limit; trimmed the microsecond '
+            'suffix to produce: {}'.format(PG_MAX_IDENTIFIER, dest_schema))
+    if len(dest_schema) > PG_MAX_IDENTIFIER:
+        raise ValueError(
+            'Output schema name is {} chars, over the {}-char Postgres limit: {}. Shorten the '
+            'scenario file name or the attachment tag.'.format(
+                len(dest_schema), PG_MAX_IDENTIFIER, dest_schema))
     inputs['dest_schema'] = dest_schema
 
     sql = '''SELECT diffusion_shared.clone_schema('{source_schema}', '{dest_schema}', '{role}', {include_data});'''.format(**inputs)

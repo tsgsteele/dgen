@@ -16,6 +16,7 @@ import numpy as np
 import data_functions as datfunc
 import utility_functions as utilfunc
 import settings
+import config
 import agent_mutation
 import diffusion_functions_elec
 import financial_functions
@@ -161,6 +162,16 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                     schema="diffusion_shared"
                 )
                 # ADJUST PRICES BASED ON SCENARIO
+                # Which tables get used is decided purely by whether "baseline" appears in the
+                # output schema name, so log it explicitly -- a failed schema creation would
+                # otherwise silently send a baseline run down the national-price branch.
+                logger.info(
+                    'Price tables for schema "{}": {}'.format(
+                        scenario_settings.schema,
+                        'BASELINE (pv_price_baseline / pv_plus_batt_baseline, state-specific)'
+                        if "baseline" in scenario_settings.schema
+                        else 'NATIONAL dollar-per-watt (pv_price_dollar_per_watt / '
+                             'pv_plus_batt_dollar_per_watt) -- correct for policy runs only'))
                 if "baseline" in scenario_settings.schema:
                     pv_price_traj = pd.read_sql_table(
                         "pv_price_baseline",
@@ -334,8 +345,15 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
 
                     # split by agent ID
                     all_ids      = static_df.index.tolist()
-                    chunks       = np.array_split(all_ids, cores)
                     total_agents = len(all_ids)
+                    # Never create more chunks than there are agents. np.array_split(ids, cores)
+                    # emits EMPTY chunks when total_agents < cores (e.g. DC has 13 agents with
+                    # LOCAL_CORES=16), and an empty df_chunk makes the on_done callback's
+                    # .iloc[0] raise IndexError *inside* the Pool callback thread. That kills the
+                    # result handler and pool.join() below then blocks forever -- the run hangs
+                    # with no traceback. Guard by capping chunk count and dropping empties.
+                    n_chunks     = max(1, min(int(cores), total_agents))
+                    chunks       = [c for c in np.array_split(all_ids, n_chunks) if len(c) > 0]
 
                     tasks = [
                         (
@@ -359,22 +377,29 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                         """
                         result: (df_chunk, agg)
                         """
-                        df_chunk, agg = result
-                        elapsed = time.time() - chunk_start[idx]
-                        with lock:
-                            completed_chunks.value += 1
-                            processed_agents.value += len(df_chunk)
-                            pct = processed_agents.value / total_agents
+                        # NOTE: any exception raised in a Pool callback kills the result
+                        # handler thread and makes pool.join() hang forever, so this whole body
+                        # is defensive -- progress logging must never be able to break the run.
+                        try:
+                            df_chunk, agg = result
+                            elapsed = time.time() - chunk_start[idx]
+                            with lock:
+                                completed_chunks.value += 1
+                                processed_agents.value += len(df_chunk)
+                                pct = (processed_agents.value / total_agents) if total_agents else 1.0
 
-                        print(
-                            f"[Chunk {idx+1}/{len(tasks)}] "
-                            f"[{df_chunk['state_abbr'].iloc[0]}] "
-                            f"sized {len(df_chunk)} agents in {elapsed:.2f}s → "
-                            f"{processed_agents.value}/{total_agents} ({pct:.0%})",
-                            flush=True
-                        )
+                            state_lbl = df_chunk['state_abbr'].iloc[0] if len(df_chunk) else '-'
+                            print(
+                                f"[Chunk {idx+1}/{len(tasks)}] "
+                                f"[{state_lbl}] "
+                                f"sized {len(df_chunk)} agents in {elapsed:.2f}s → "
+                                f"{processed_agents.value}/{total_agents} ({pct:.0%})",
+                                flush=True
+                            )
+                        except Exception as e:
+                            print(f"[Chunk {idx+1}] progress-callback error (ignored): {e}", flush=True)
                         # return the result intact so parent can collect both df and agg
-                        return (df_chunk, agg)
+                        return result
 
                     # dispatch
                     results = []
@@ -417,6 +442,14 @@ def main(mode=None, resume_year=None, endyear=None, ReEDS_inputs=None):
                 # 1) Merge onto the agent frame by state; fill missing with 0
                 solar_agents.df = solar_agents.df.merge(_state_rates, on="state_abbr", how="left")
                 solar_agents.df["storage_attachment_rate"] = solar_agents.df["storage_attachment_rate"].fillna(0.0)
+
+                # Flat attachment-rate sensitivity (5% / 75% / 100% Synapse scenarios): when the
+                # FLAT_STORAGE_ATTACHMENT_RATE env var is set, apply that single rate to EVERY state,
+                # overriding the Ohm per-state rates. Unset -> keep the per-state rates above.
+                if config.FLAT_STORAGE_ATTACHMENT_RATE is not None:
+                    solar_agents.df["storage_attachment_rate"] = config.FLAT_STORAGE_ATTACHMENT_RATE
+                    logger.info(f"FLAT storage attachment override: all states -> "
+                                f"{config.FLAT_STORAGE_ATTACHMENT_RATE:.0%}")
 
                 # restore agent_id as index without dropping the column (idempotent)
                 if 'agent_id' in solar_agents.df.columns and solar_agents.df.index.name != 'agent_id':
